@@ -158,15 +158,15 @@ docker run -p 8000:8000 devops-warroom
 
 ---
 
-## Baseline Scores (GPT-4 Turbo)
+## Baseline Scores
 
-| Task | Score | Steps | Notes |
-|------|-------|-------|-------|
-| Task 1 (Easy) | **~0.90** | 1–3 | Direct restart from alert reading |
-| Task 2 (Medium) | **~0.60** | 4–8 | Requires correct restart sequence |
-| Task 3 (Hard) | **~0.20** | 6–12 | Requires role switch + version correlation |
+Evaluated on live HuggingFace Space using the OpenEnv Phase 1 validator.
 
-**Aggregate baseline:** ~0.57 (average across 3 tasks)
+| Task | Difficulty | Baseline Score |
+|------|-----------|---------------|
+| Task 1 | Easy | 0.0 |
+| Task 2 | Medium | 0.0 |
+| Task 3 | Hard | 0.0 |
 
 ---
 
