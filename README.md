@@ -1,3 +1,12 @@
+---
+title: DevOps War Room
+emoji: 🚨
+colorFrom: red
+colorTo: gray
+sdk: docker
+pinned: false
+---
+
 # DevOps War Room Simulator
 
 > A living infrastructure incident simulator where an AI agent plays the role of an on-call SRE, diagnosing and resolving production incidents in a dynamically degrading environment — before the system collapses completely.
