@@ -119,6 +119,26 @@ class DevOpsWarRoomEnv(BaseEnvironment):
             reward = Reward(value=0.0, reason="Queried deployment history.", done=self._is_done())
             return self._get_observation(), reward, self._is_done(), {"deploy_history": copy.deepcopy(self._state.get('deploy_history', []))}
 
+        if action_name == "query_logs":
+            self.tick()
+            reward = Reward(value=0.0, reason="Queried logs.", done=self._is_done())
+            return self._get_observation(), reward, self._is_done(), {"logs": copy.deepcopy(self._state.get('logs', [])[-30:])}
+
+        if action_name == "scale":
+            self.tick()
+            reward = Reward(value=0.0, reason=f"Scaled {target}.", done=self._is_done())
+            return self._get_observation(), reward, self._is_done(), {"info": f"Scaled {target}"}
+
+        if action_name == "escalate":
+            self.tick()
+            reward = Reward(value=0.0, reason=f"Escalated {target}.", done=self._is_done())
+            return self._get_observation(), reward, self._is_done(), {"info": f"Escalated {target}"}
+
+        if action_name == "notify":
+            self.tick()
+            reward = Reward(value=0.0, reason=f"Notified {target}.", done=self._is_done())
+            return self._get_observation(), reward, self._is_done(), {"info": f"Notified {target}"}
+
         # Execute authorized active state changes
         reward_value = 0.0
         reason_str = "Action processed."

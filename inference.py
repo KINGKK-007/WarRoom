@@ -1,7 +1,7 @@
 """
 inference.py — OpenEnv Baseline Agent for DevOps War Room
 
-Reads API_BASE_URL, MODEL_NAME, HF_TOKEN from environment variables.
+Reads OPENAI_API_KEY from environment variable (set as HuggingFace Space secret).
 Uses the OpenAI client to query an LLM for action decisions.
 Logs structured JSON in the exact START / STEP / END format required
 by the OpenEnv Phase 1 automated validator.
@@ -82,6 +82,42 @@ def log_end(success: bool, steps: int, score: float, rewards: list):
 # Prompt engineering — role-adaptive observation formatting
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# System prompt — expert SRE decision protocol
+# ---------------------------------------------------------------------------
+
+SYSTEM_PROMPT = """You are an expert on-call SRE responding to a live production incident.
+
+You operate in a role-based environment. Your role controls what you can see and do.
+
+ROLES:
+- SRE: query_metrics, restart_service, inspect, scale. Sees: error_rate, cpu, memory, p99_latency_ms, requests_per_sec, services, alerts.
+- Dev: rollback_deploy, query_deploy, query_logs. Sees: deployment_history, code_diffs, logs.
+- Manager: escalate, notify. Sees: sla_status, affected_users.
+- All roles: switch_role (costs 1 step, use sparingly).
+
+STRICT DECISION PROTOCOL — follow this every episode:
+1. Start as SRE. Run "query metrics" first. Read error_rate and p99_latency_ms.
+2. Check alerts. If a CRITICAL alert names a service, that is your target.
+3. If all services appear healthy but latency is high (p99 > 500ms), switch to Dev and run "query deploy history".
+4. Look for a recent deployment that correlates with the incident start time.
+5. If a bad deploy is identified, run "rollback [service] [version]" where version is the previous stable one.
+6. If a service is DOWN or DEGRADED with a clear alert, run "restart service [name]".
+7. After fixing, run "query metrics" again to confirm error_rate is dropping.
+8. Never restart a service that is already healthy.
+9. Never repeat the same action twice in a row.
+10. Never issue more than one command per response.
+
+OUTPUT FORMAT:
+Respond with a single command string only. No explanation. No punctuation. Examples:
+query metrics
+restart service database
+switch role dev
+query deploy history
+rollback api-service v2.3.0
+"""
+
+
 def build_prompt(obs_dict: dict) -> str:
     """Build a role-aware prompt from the observation dictionary.
 
@@ -90,18 +126,24 @@ def build_prompt(obs_dict: dict) -> str:
     """
     role = obs_dict.get("current_role", "SRE")
     tick = obs_dict.get("tick", 0)
+    steps_remaining = obs_dict.get("steps_remaining", "?")
 
     prompt = (
-        f"You are an expert AI SRE/DevOps incident responder.\n"
-        f"Current role: {role} | Tick: {tick}\n\n"
+        f"Current role: {role} | Tick: {tick} | Steps remaining: {steps_remaining}\n\n"
     )
 
     # Services — always visible
     services = obs_dict.get("services", {})
     prompt += "SERVICE STATUS:\n"
     for svc, status in services.items():
-        indicator = "✅" if str(status) == "up" else ("⚠️" if str(status) == "degraded" else "❌")
-        prompt += f"  {indicator} {svc}: {status}\n"
+        svc_str = str(status)
+        if svc_str == "healthy":
+            indicator = "✅"
+        elif svc_str == "degraded":
+            indicator = "⚠️"
+        else:
+            indicator = "❌"
+        prompt += f"  {indicator} {svc}: {svc_str}\n"
     prompt += "\n"
 
     # Alerts — always visible
@@ -114,6 +156,8 @@ def build_prompt(obs_dict: dict) -> str:
             else:
                 prompt += f"  {alert}\n"
         prompt += "\n"
+    else:
+        prompt += "ACTIVE ALERTS: None\n\n"
 
     # Metrics — SRE role
     metrics = obs_dict.get("metrics")
@@ -157,19 +201,31 @@ def build_prompt(obs_dict: dict) -> str:
         prompt += f"ESTIMATED AFFECTED USERS: {affected}\n"
 
     prompt += (
-        "\nAvailable actions:\n"
-        "  restart service {name}    — (SRE) restart a broken service\n"
-        "  rollback deploy {name} {version} — (Dev) rollback a deployment\n"
-        "  switch role {sre|dev|manager}    — switch observation perspective\n"
-        "  inspect {target}          — (SRE) inspect a service\n"
-        "  query metrics             — (SRE) view current metrics\n"
-        "  query deploy              — (Dev) view deploy history\n"
-        "  query logs                — (Dev) view recent logs\n"
-        "  scale {target}            — (SRE) scale a service\n"
-        "  escalate {target}         — (Manager) escalate incident\n"
-        "  notify {target}           — (Manager) notify stakeholders\n"
-        "\nRespond with ONLY the exact command to execute. No explanation."
+        "\nAvailable actions for your current role:\n"
     )
+    if role == "SRE":
+        prompt += (
+            "  restart service {name}    — restart a broken service\n"
+            "  inspect {target}          — inspect a service\n"
+            "  query metrics             — view current metrics\n"
+            "  scale {target}            — scale a service\n"
+            "  switch role {dev|manager} — switch role (costs 1 step)\n"
+        )
+    elif role == "Dev":
+        prompt += (
+            "  rollback deploy {name} {version} — rollback a deployment\n"
+            "  query deploy history      — view deploy history\n"
+            "  query logs                — view recent logs\n"
+            "  switch role {sre|manager} — switch role (costs 1 step)\n"
+        )
+    elif role == "Manager":
+        prompt += (
+            "  escalate {target}         — escalate incident\n"
+            "  notify {target}           — notify stakeholders\n"
+            "  switch role {sre|dev}     — switch role (costs 1 step)\n"
+        )
+
+    prompt += "\nRespond with ONLY the exact command to execute. No explanation."
 
     return prompt
 
@@ -181,20 +237,23 @@ def build_prompt(obs_dict: dict) -> str:
 def main():
     # Read required environment variables
     api_base_url = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
-    model_name = os.environ.get("MODEL_NAME", "gpt-4-turbo")
-    api_key = os.environ.get("HF_TOKEN", os.environ.get("OPENAI_API_KEY", "dummy-key"))
+    model_name = os.environ.get("MODEL_NAME", "gpt-4o-mini")
+    api_key = os.environ.get("OPENAI_API_KEY")
+
+    if not api_key:
+        raise RuntimeError(
+            "OPENAI_API_KEY environment variable not set. "
+            "Add it as a HuggingFace Space secret at: "
+            "https://huggingface.co/spaces/coolalien35/warroom-deploy/settings"
+        )
 
     # Initialize OpenAI client with timeout protection
-    client = None
-    try:
-        client = OpenAI(
-            base_url=api_base_url,
-            api_key=api_key,
-            timeout=LLM_CALL_TIMEOUT_SECONDS,
-            max_retries=1,
-        )
-    except Exception as e:
-        print(f"Warning: OpenAI client init failed: {e}", flush=True)
+    client = OpenAI(
+        base_url=api_base_url,
+        api_key=api_key,
+        timeout=LLM_CALL_TIMEOUT_SECONDS,
+        max_retries=2,
+    )
 
     # Initialize environment
     env = DevOpsWarRoomEnv()
@@ -234,34 +293,28 @@ def main():
                 )
                 break
 
-            # --- Decide action via LLM or fallback ---
+            # --- Decide action via LLM ---
             action_text = "query metrics"  # safe fallback
-            if client:
-                try:
-                    obs_dict = obs.model_dump() if hasattr(obs, "model_dump") else obs.dict()
-                    prompt = build_prompt(obs_dict)
+            try:
+                obs_dict = obs.model_dump() if hasattr(obs, "model_dump") else obs.dict()
+                prompt = build_prompt(obs_dict)
 
-                    response = client.chat.completions.create(
-                        model=model_name,
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": (
-                                    "You are resolving a production incident in a DevOps war room. "
-                                    "Respond with exactly one command. No explanation, no markdown."
-                                ),
-                            },
-                            {"role": "user", "content": prompt},
-                        ],
-                        max_tokens=64,
-                        temperature=0.0,
-                    )
-                    raw = response.choices[0].message.content.strip()
-                    # Clean up any markdown formatting the LLM might add
-                    action_text = raw.strip("`").strip('"').strip("'").split("\n")[0].strip()
-                except Exception:
-                    # Fallback on any LLM error (timeout, rate limit, auth, etc.)
-                    action_text = "switch role sre"
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    max_tokens=64,
+                    temperature=0.0,
+                )
+                raw = response.choices[0].message.content.strip()
+                # Clean up any markdown formatting the LLM might add
+                action_text = raw.strip("`").strip('"').strip("'").split("\n")[0].strip()
+            except Exception as e:
+                print(f"[LLM ERROR] {e}", flush=True)
+                # Fallback on any LLM error (timeout, rate limit, auth, etc.)
+                action_text = "query metrics"
 
             # --- Execute action in environment ---
             action_payload = Action(action_type="raw_command", target=action_text)

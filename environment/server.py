@@ -9,11 +9,13 @@ Exposes the three required OpenEnv endpoints:
 Plus health-check and root endpoints for HuggingFace Space monitoring.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Any, Dict, Optional
 import traceback
+import json
 
 from .env import DevOpsWarRoomEnv
 from .models import Action, Scenario, ServiceState, Alert
@@ -122,8 +124,119 @@ def root():
 
 @app.get("/health")
 def health():
-    """Health check endpoint for HuggingFace Space monitoring."""
-    return {"status": "ok"}
+    """Health check endpoint — OpenEnv validator expects status='healthy'."""
+    return {"status": "healthy"}
+
+
+@app.get("/metadata")
+def metadata():
+    """Return environment metadata (name, description, version)."""
+    return {
+        "name": "devops-warroom",
+        "description": "Living infrastructure incident simulator with multi-role agent support",
+        "version": "1.0.0",
+        "team": "BholeChature",
+        "tags": ["devops", "incident-response", "sre", "real-world"],
+    }
+
+
+@app.get("/schema")
+def schema():
+    """Return JSON schemas for action, observation, and state."""
+    from .models import Action as ActionModel, Observation as ObsModel
+    return {
+        "action": ActionModel.model_json_schema(),
+        "observation": ObsModel.model_json_schema(),
+        "state": {
+            "type": "object",
+            "description": "Raw environment state dict with services, metrics, alerts, logs, etc.",
+            "properties": {
+                "services": {"type": "object"},
+                "metrics": {"type": "object"},
+                "alerts": {"type": "array"},
+                "logs": {"type": "array"},
+                "deploy_history": {"type": "array"},
+                "code_diffs": {"type": "array"},
+                "sla_status": {"type": "string"},
+                "estimated_affected_users": {"type": "integer"},
+            },
+        },
+    }
+
+
+@app.post("/mcp")
+async def mcp_endpoint(request: Request):
+    """MCP (Model Context Protocol) JSON-RPC endpoint.
+
+    Supports initialize, tools/list, and tools/call methods.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}, "id": None})
+
+    rpc_id = body.get("id")
+    method = body.get("method", "")
+
+    if method == "initialize":
+        return JSONResponse({
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "devops-warroom", "version": "1.0.0"},
+            },
+        })
+
+    if method == "tools/list":
+        return JSONResponse({
+            "jsonrpc": "2.0",
+            "id": rpc_id,
+            "result": {
+                "tools": [
+                    {
+                        "name": "reset",
+                        "description": "Reset the environment to a specific task",
+                        "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string", "enum": ["Easy", "Medium", "Hard"]}}},
+                    },
+                    {
+                        "name": "step",
+                        "description": "Execute an action in the environment",
+                        "inputSchema": {"type": "object", "properties": {"action_type": {"type": "string"}, "target": {"type": "string"}}},
+                    },
+                    {
+                        "name": "state",
+                        "description": "Get the current environment state",
+                        "inputSchema": {"type": "object", "properties": {}},
+                    },
+                ],
+            },
+        })
+
+    if method == "tools/call":
+        tool_name = body.get("params", {}).get("name", "")
+        tool_args = body.get("params", {}).get("arguments", {})
+
+        try:
+            if tool_name == "reset":
+                task_id = Scenario(tool_args.get("task_id", "Easy"))
+                obs = env.reset(task_id)
+                result_data = _obs_to_dict(obs)
+            elif tool_name == "step":
+                action = Action(**tool_args)
+                obs, reward, done, info = env.step(action)
+                result_data = {"observation": _obs_to_dict(obs), "reward": _reward_to_dict(reward), "done": done, "info": info}
+            elif tool_name == "state":
+                result_data = _serialize_state(env.state)
+            else:
+                return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32601, "message": f"Unknown tool: {tool_name}"}})
+
+            return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "result": [{"type": "text", "text": json.dumps(result_data)}]})
+        except Exception as e:
+            return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32000, "message": str(e)}})
+
+    return JSONResponse({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32601, "message": f"Method not found: {method}"}})
 
 
 @app.post("/reset")
