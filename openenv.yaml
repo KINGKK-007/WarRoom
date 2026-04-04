@@ -1,0 +1,16 @@
+name: devops-warroom
+version: 1.0.0
+description: "Living infrastructure incident simulator with multi-role agent support"
+tags: ["devops", "incident-response", "sre", "real-world"]
+team: BholeChature
+endpoint: https://PLACEHOLDER.hf.space
+tasks:
+  - id: task_1
+    name: "Single Service Outage"
+    difficulty: easy
+  - id: task_2
+    name: "Cascading Failure"
+    difficulty: medium
+  - id: task_3
+    name: "Silent Data Corruption"
+    difficulty: hard
