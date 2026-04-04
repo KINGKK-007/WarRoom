@@ -14,7 +14,7 @@ COPY . .
 # package due to Python's module resolution order.
 RUN rm -f openenv.py
 
-EXPOSE 8000
+EXPOSE 7860
 
 # Start the FastAPI server
-CMD ["uvicorn", "environment.server:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "environment.server:app", "--host", "0.0.0.0", "--port", "7860"]
