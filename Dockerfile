@@ -1,13 +1,18 @@
 FROM python:3.11-slim
 
-WORKDIR /app
+# Set up a non-root user per HF Spaces requirements
+RUN useradd -m -u 1000 user
+USER user
+ENV HOME=/home/user \
+	PATH=/home/user/.local/bin:$PATH
 
-# Install dependencies first (layer caching)
-COPY requirements.txt .
+WORKDIR $HOME/app
+
+COPY --chown=user requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY . .
+COPY --chown=user . .
 
 # CRITICAL: Remove the local openenv.py shim so the pip-installed
 # openenv package is imported instead. The shim shadows the real
