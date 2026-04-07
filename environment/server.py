@@ -11,7 +11,7 @@ Plus health-check and root endpoints for HuggingFace Space monitoring.
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from typing import Any, Dict, Optional
 import traceback
@@ -49,6 +49,7 @@ env = DevOpsWarRoomEnv()
 
 class ResetRequest(BaseModel):
     task_id: Scenario = Scenario.EASY
+    seed: Optional[int] = None
 
 
 class StepResponse(BaseModel):
@@ -120,6 +121,76 @@ def root():
         "environment": "devops-warroom",
         "version": "1.0.0",
     }
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard():
+    return """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>DevOps War Room Dashboard</title>
+  <style>
+    :root { --bg:#0f1419; --panel:#182028; --text:#e6edf3; --muted:#9fb0c0; --good:#3fb950; --warn:#d29922; --bad:#f85149; --accent:#58a6ff; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, sans-serif; background: radial-gradient(circle at top, #1b2735, #0f1419 65%); color:var(--text); }
+    .wrap { max-width: 1280px; margin: 0 auto; padding: 24px; }
+    .grid { display:grid; grid-template-columns: 1.2fr 1fr 1fr; gap:16px; }
+    .panel { background: rgba(24,32,40,.92); border:1px solid rgba(88,166,255,.18); border-radius: 18px; padding: 16px; box-shadow: 0 12px 40px rgba(0,0,0,.28); }
+    h1,h2,h3 { margin:0 0 12px; }
+    .metrics { display:grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    .metric { padding: 12px; border-radius: 12px; background:#111821; }
+    .svc { display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid rgba(255,255,255,.06);}
+    .healthy{color:var(--good)} .degraded{color:var(--warn)} .down,.isolated{color:var(--bad)}
+    code { color: var(--accent); }
+    ul { margin:0; padding-left:18px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>DevOps War Room</h1>
+    <p id="summary" style="color:var(--muted)">Loading state…</p>
+    <div class="grid">
+      <div class="panel">
+        <h2>Metrics</h2>
+        <div class="metrics" id="metrics"></div>
+      </div>
+      <div class="panel">
+        <h2>Zone Health</h2>
+        <div id="zones"></div>
+      </div>
+      <div class="panel">
+        <h2>Incident Timeline</h2>
+        <ul id="timeline"></ul>
+      </div>
+      <div class="panel" style="grid-column: span 2;">
+        <h2>Service Topology Snapshot</h2>
+        <div id="services"></div>
+      </div>
+      <div class="panel">
+        <h2>RCA</h2>
+        <pre id="rca" style="white-space:pre-wrap;color:var(--muted)"></pre>
+      </div>
+    </div>
+  </div>
+  <script>
+    async function load() {
+      const [stateResp, timelineResp] = await Promise.all([fetch('/state'), fetch('/timeline')]);
+      const state = await stateResp.json();
+      const timeline = await timelineResp.json();
+      document.getElementById('summary').textContent = `${state.incident.name} | severity=${state.incident.severity} | resolved=${state.incident.resolved}`;
+      document.getElementById('metrics').innerHTML = Object.entries(state.metrics).map(([k,v]) => `<div class="metric"><strong>${k}</strong><div>${v}</div></div>`).join('');
+      document.getElementById('zones').innerHTML = Object.entries(state.zones).map(([z,detail]) => `<div class="svc"><span>${z}</span><span class="${detail.status}">${detail.status}</span></div>`).join('');
+      document.getElementById('services').innerHTML = Object.entries(state.services).slice(0,24).map(([svc,status]) => `<div class="svc"><span>${svc}</span><span class="${status}">${status}</span></div>`).join('');
+      document.getElementById('timeline').innerHTML = timeline.events.slice(-10).map(evt => `<li><code>${evt.tick}</code> ${evt.summary}</li>`).join('');
+      document.getElementById('rca').textContent = state.incident.rca ? JSON.stringify(state.incident.rca, null, 2) : 'RCA not generated yet.';
+    }
+    load();
+    setInterval(load, 4000);
+  </script>
+</body>
+</html>
+"""
 
 
 @app.get("/health")
@@ -198,7 +269,7 @@ async def mcp_endpoint(request: Request):
                     {
                         "name": "reset",
                         "description": "Reset the environment to a specific task",
-                        "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string", "enum": ["Easy", "Medium", "Hard"]}}},
+                        "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string", "enum": ["Easy", "Medium", "Hard", "Chaos"]}, "seed": {"type": "integer"}}},
                     },
                     {
                         "name": "step",
@@ -221,7 +292,7 @@ async def mcp_endpoint(request: Request):
         try:
             if tool_name == "reset":
                 task_id = Scenario(tool_args.get("task_id", "Easy"))
-                obs = env.reset(task_id)
+                obs = env.reset(task_id, seed=tool_args.get("seed"))
                 result_data = _obs_to_dict(obs)
             elif tool_name == "step":
                 action = Action(**tool_args)
@@ -246,7 +317,7 @@ def reset(request: ResetRequest):
     Returns the initial observation as a JSON dict.
     """
     try:
-        obs = env.reset(request.task_id)
+        obs = env.reset(request.task_id, seed=request.seed)
         return _obs_to_dict(obs)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Reset failed: {str(e)}")
@@ -287,3 +358,11 @@ def get_state():
         return _serialize_state(env.state)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"State retrieval failed: {str(e)}")
+
+
+@app.get("/timeline")
+def get_timeline():
+    try:
+        return {"events": env.timeline()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Timeline retrieval failed: {str(e)}")

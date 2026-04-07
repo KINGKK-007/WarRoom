@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Tuple
 from .actions import ACTION_CATALOG, CommandParser
 from .models import Action, Alert, Observation, Reward, Role, Scenario, ServiceState
 from .roles import RoleManager
-from .scenarios import SCENARIOS, SERVICE_DEPENDENCIES, generate_procedural_incident
+from .scenarios import SCENARIOS, SERVICE_DEPENDENCIES, generate_procedural_incident, generate_variant
 
 try:
     from openenv import BaseEnvironment
@@ -32,13 +32,18 @@ class DevOpsWarRoomEnv(BaseEnvironment):
     def state(self) -> dict:
         return self._state
 
-    def reset(self, task_id: Scenario = Scenario.EASY) -> Observation:
+    def timeline(self) -> List[Dict[str, Any]]:
+        return copy.deepcopy(self._state.get("incident", {}).get("events", []))
+
+    def reset(self, task_id: Scenario = Scenario.EASY, seed: int | None = None) -> Observation:
         self.step_count = 0
         self.tick_count = 0
         self.task_id = task_id
         self.role_manager = RoleManager(Role.SRE)
         self.role = self.role_manager.current_role
-        if task_id == Scenario.CHAOS:
+        if seed is not None:
+            self._state = generate_variant(task_id, seed)
+        elif task_id == Scenario.CHAOS:
             self._state = generate_procedural_incident(seed=20260407)
         else:
             self._state = copy.deepcopy(SCENARIOS[task_id])
@@ -143,6 +148,14 @@ class DevOpsWarRoomEnv(BaseEnvironment):
         self.action_history.append(entry)
         self._state["incident"]["actions_executed"].append(entry)
         self.history["executed_actions"].add(f"{action_name}:{target}" if target else action_name)
+        self._state["incident"].setdefault("events", []).append(
+            {
+                "tick": self.tick_count,
+                "type": "action",
+                "summary": f"{action_name} executed{' successfully' if success else ' unsuccessfully'}",
+                "payload": {"target": target, "success": success},
+            }
+        )
 
     def _mark_evidence(self, evidence_key: str):
         self.history["seen_evidence"].add(evidence_key)
@@ -393,6 +406,17 @@ class DevOpsWarRoomEnv(BaseEnvironment):
         status = self._state["sla"]["current_status"]
         return True, (0.08 if status == "CURRENTLY_MET" else -0.02), "Verified SLA.", {"sla": copy.deepcopy(self._state["sla"])}
 
+    def _build_causal_chain(self):
+        chain = []
+        for root in self._state["incident"]["root_causes"]:
+            impacted = [
+                service
+                for service, dependencies in SERVICE_DEPENDENCIES.items()
+                if root in dependencies and self._state["services"].get(service) != ServiceState.healthy
+            ]
+            chain.append({"root": root, "downstream_impacts": impacted})
+        return chain
+
     def _run_rca(self):
         evidence_ready = all(item in self._state["incident"]["evidence_collected"] for item in self._state["incident"]["required_evidence"][: max(2, min(5, len(self._state["incident"]["required_evidence"])) )])
         mitigation_ready = len(self._state["incident"]["mitigations_applied"]) > 0
@@ -403,6 +427,19 @@ class DevOpsWarRoomEnv(BaseEnvironment):
             "evidence": copy.deepcopy(self._state["incident"]["evidence_collected"]),
             "mitigations": copy.deepcopy(self._state["incident"]["mitigations_applied"]),
             "ignored_alert_ticks": self._state["incident"]["ignored_alert_ticks"],
+            "blast_radius": sorted(
+                service for service, state in self._state["services"].items() if state != ServiceState.healthy
+            ),
+            "contributing_factors": [
+                f"zone:{zone}" for zone, detail in self._state["zones"].items() if detail["status"] != "healthy"
+            ] + [
+                f"deploy:{service}" for service in self._state["incident"]["deploy_targets"]
+            ],
+            "ruled_out_causes": [
+                service for service in ["prometheus", "grafana", "status-page"] if service not in self._state["incident"]["root_causes"]
+            ],
+            "recommended_followups": ["add canary verification", "extend alert coverage", "update rollback runbook"],
+            "causal_chain": self._build_causal_chain(),
         }
         self._state["incident"]["artifact_status"]["rca"] = True
         self._mark_production_action("run_rca")
@@ -417,6 +454,7 @@ class DevOpsWarRoomEnv(BaseEnvironment):
             "timeline": copy.deepcopy(self._state["incident"]["timeline"]),
             "follow_ups": ["runbook update", "capacity review", "chaos replay"],
             "sla_status": self._state["sla"]["current_status"],
+            "rca_summary": copy.deepcopy(self._state["incident"]["rca"]),
         }
         self._state["incident"]["artifact_status"]["postmortem"] = True
         self._mark_production_action("generate_postmortem")
@@ -534,6 +572,19 @@ class DevOpsWarRoomEnv(BaseEnvironment):
         self._state["incident"]["timeline"].append(
             f"tick={self.tick_count} action={action_name} cpu={self._state['metrics']['cpu']} memory={self._state['metrics']['memory']} latency={self._state['metrics']['p99_latency_ms']} error_rate={self._state['metrics']['error_rate']}"
         )
+        self._state["incident"].setdefault("events", []).append(
+            {
+                "tick": self.tick_count,
+                "type": "tick",
+                "summary": f"tick {self.tick_count} after {action_name}",
+                "payload": {
+                    "cpu": self._state["metrics"]["cpu"],
+                    "memory": self._state["metrics"]["memory"],
+                    "latency": self._state["metrics"]["p99_latency_ms"],
+                    "error_rate": self._state["metrics"]["error_rate"],
+                },
+            }
+        )
 
     def _advance_failure_dynamics(self, action_name: str):
         incident = self._state["incident"]
@@ -546,6 +597,14 @@ class DevOpsWarRoomEnv(BaseEnvironment):
                     self._state["service_details"]["scheduler-service"]["zone_states"]["us-east-1b"] = ServiceState.degraded
                     self._state["service_details"]["notification-service"]["zone_states"]["us-east-1b"] = ServiceState.degraded
                     self._state["logs"].append({"tick": self.tick_count, "service": "worker-service", "level": "ERROR", "message": "worker OOM event fired"})
+                    self._state["incident"].setdefault("events", []).append(
+                        {
+                            "tick": self.tick_count,
+                            "type": "failure",
+                            "summary": "worker-service OOM event propagated to dependent services",
+                            "payload": {"service": "worker-service"},
+                        }
+                    )
                 incident["pending_failures"].remove(event)
 
         for zone_name, zone in self._state["zones"].items():
@@ -585,6 +644,14 @@ class DevOpsWarRoomEnv(BaseEnvironment):
         sla["current_status"] = "BREACHED" if breached else "CURRENTLY_MET"
         if breached and (force_record or not sla["breaches"] or sla["breaches"][-1]["tick"] != self.tick_count):
             sla["breaches"].append({"tick": self.tick_count, "error_rate": metrics["error_rate"], "availability": metrics["availability"]})
+            self._state["incident"].setdefault("events", []).append(
+                {
+                    "tick": self.tick_count,
+                    "type": "sla_breach",
+                    "summary": "SLA breach recorded",
+                    "payload": {"error_rate": metrics["error_rate"], "availability": metrics["availability"]},
+                }
+            )
 
     def _update_alerts(self):
         alerts = self._state["alerts"]
@@ -641,7 +708,9 @@ class DevOpsWarRoomEnv(BaseEnvironment):
             incident["recovery_tick"] = self.tick_count
 
     def _is_done(self) -> bool:
-        sla_breach_terminal = len(self._state["sla"]["breaches"]) >= 3 or self._state["metrics"]["availability"] < 95.0
+        sla_breach_terminal = len(self._state["sla"]["breaches"]) >= 3 or (
+            self.step_count >= 3 and self._state["metrics"]["availability"] < 95.0
+        )
         full_recovery = self._state["incident"]["recovery_tick"] is not None
         return self.step_count >= self.max_steps or full_recovery or sla_breach_terminal or self._state["metrics"]["error_rate"] >= 0.99
 
@@ -654,6 +723,7 @@ class DevOpsWarRoomEnv(BaseEnvironment):
             "mitigations_applied": copy.deepcopy(self._state["incident"]["mitigations_applied"]),
             "production_actions_completed": copy.deepcopy(self._state["incident"]["production_actions_completed"]),
             "ignored_alert_ticks": self._state["incident"]["ignored_alert_ticks"],
+            "variant": copy.deepcopy(self._state["incident"].get("variant")),
         }
         obs_data = {
             "tick": self.tick_count,
