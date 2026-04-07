@@ -1,84 +1,44 @@
-from typing import List, Dict, Any
-
-# Anti-exploit: command verbs that should not appear together in a single action
-_COMMAND_VERBS = ["restart", "rollback", "scale", "inspect", "query", "switch", "escalate", "notify"]
+from typing import Any, Dict, List
 
 
-def _is_keyword_stuffed(action_str: str) -> bool:
-    """Return True if the action string contains more than two command verbs.
-    This prevents agents from gaming graders with a single 'magic string'."""
-    verb_count = sum(1 for verb in _COMMAND_VERBS if verb in action_str)
-    return verb_count > 2
+def _value(obj: Any):
+    return getattr(obj, "value", obj)
+
+
+def _restart_penalty(action_history: List[Any], healthy_target: str) -> float:
+    penalty = 0.0
+    for action in action_history:
+        if isinstance(action, dict) and action.get("action") == "restart_service" and action.get("target") != healthy_target:
+            penalty += 0.08
+    return penalty
 
 
 def grade(action_history: List[Any], final_state: Dict[str, Any]) -> float:
-    """
-    Grader for Task 2 (Medium): Cascading Failure
+    services = final_state.get("services", {})
+    metrics = final_state.get("metrics", {})
+    incident = final_state.get("incident", {})
+    zones = final_state.get("zones", {})
 
-    STATE-BASED VALIDATION:
-    - Verifies worker was actually fixed (became healthy)
-    - Verifies cascade was prevented (api/auth didn't degrade)
-    - Checks proper sequence (worker before api if both touched)
-    - Validates error_rate improved
-    """
-    rewards = []
+    score = 0.0
+    if _value(services.get("worker-service")) == "healthy":
+        score += 0.22
+    if _value(services.get("scheduler-service")) == "healthy" and _value(services.get("notification-service")) == "healthy":
+        score += 0.14
+    if zones.get("us-east-1b", {}).get("status") == "healthy":
+        score += 0.1
+    if metrics.get("queue_depth", 999999) <= 5000:
+        score += 0.18
+    if metrics.get("error_rate", 1.0) <= 0.05 and metrics.get("p99_latency_ms", 9999) <= 600:
+        score += 0.1
+    if set(["inspect:worker-service", "query_metrics", "query_logs", "query_traces", "query_topology"]).issubset(set(incident.get("evidence_collected", []))):
+        score += 0.08
+    if set(["clear_queue:worker-service", "scale:worker-service", "tune_autoscaling:worker-service", "drain_zone:us-east-1b", "restore_zone:us-east-1b"]).issubset(set(incident.get("mitigations_applied", []))):
+        score += 0.1
+    if incident.get("artifact_status", {}).get("rca") and incident.get("artifact_status", {}).get("postmortem"):
+        score += 0.04
+    if incident.get("artifact_status", {}).get("runbook_attached"):
+        score += 0.04
 
-    worker_idx = -1
-    api_idx = -1
-    unnecessary_restarts = 0
-
-    # 1. ACTION VALIDATION: Identify restarts
-    for i, a in enumerate(action_history):
-        act_str = str(a).lower()
-
-        # Anti-exploit: skip keyword-stuffed actions
-        if _is_keyword_stuffed(act_str):
-            continue
-
-        if 'restart' in act_str:
-            if 'worker' in act_str and worker_idx == -1:
-                worker_idx = i
-                rewards.append(0.4)  # Root cause identified
-            elif 'api' in act_str and api_idx == -1:
-                api_idx = i
-            elif 'database' in act_str or 'db' in act_str:
-                # Restarted wrong service
-                unnecessary_restarts += 1
-                rewards.append(-0.1)
-
-    # 2. SEQUENCE VALIDATION: Worker before API (if both restarted)
-    if worker_idx != -1 and (api_idx == -1 or worker_idx < api_idx):
-        rewards.append(0.3)  # Correct sequence
-
-    # 3. STATE VALIDATION: Did the fix work?
-    services = final_state.get('services', {})
-    metrics = final_state.get('metrics', {})
-
-    # Check worker is now healthy
-    worker_status = services.get('worker', 'unknown')
-    if worker_status == 'healthy':
-        rewards.append(0.2)  # Worker recovered
-
-    # Check cascade was prevented (api and auth still healthy)
-    api_status = services.get('api', 'unknown')
-    auth_status = services.get('auth', 'unknown')
-    if api_status == 'healthy' and auth_status == 'healthy':
-        rewards.append(0.2)  # Cascade prevented
-
-    # Check error_rate is acceptable
-    error_rate = metrics.get('error_rate', 1.0)
-    if error_rate < 0.1:
-        rewards.append(0.1)  # System stable
-
-    # 4. EFFICIENCY BONUS/PENALTY
-    steps_taken = len(action_history)
-    if steps_taken <= 4:
-        rewards.append(0.1)  # Bonus for optimal
-    elif steps_taken > 8:
-        penalty = (steps_taken - 8) * 0.05
-        rewards.append(-penalty)
-
-    max_reward = 1.0
-    score = sum(rewards) / max_reward
-
-    return max(0.0, min(1.0, score))
+    penalty = _restart_penalty(action_history, "worker-service")
+    penalty += 0.05 * incident.get("ignored_alert_ticks", 0)
+    return max(0.0, min(1.0, round(score - penalty, 4)))
