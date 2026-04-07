@@ -1,75 +1,48 @@
-from typing import List, Dict, Any
-
-# Anti-exploit: command verbs that should not appear together in a single action
-_COMMAND_VERBS = ["restart", "rollback", "scale", "inspect", "query", "switch", "escalate", "notify"]
+from typing import Any, Dict, List
 
 
-def _is_keyword_stuffed(action_str: str) -> bool:
-    """Return True if the action string contains more than two command verbs.
-    This prevents agents from gaming graders with a single 'magic string'."""
-    verb_count = sum(1 for verb in _COMMAND_VERBS if verb in action_str)
-    return verb_count > 2
+def _value(obj: Any):
+    return getattr(obj, "value", obj)
+
+
+def _count_unnecessary_restarts(action_history: List[Any], allowed_target: str) -> int:
+    count = 0
+    for action in action_history:
+        if isinstance(action, dict) and action.get("action") == "restart_service" and action.get("target") != allowed_target:
+            count += 1
+    return count
 
 
 def grade(action_history: List[Any], final_state: Dict[str, Any]) -> float:
-    """
-    Grader for Task 1 (Easy): Single Service Outage
+    services = final_state.get("services", {})
+    metrics = final_state.get("metrics", {})
+    incident = final_state.get("incident", {})
+    sla = final_state.get("sla", {})
 
-    STATE-BASED VALIDATION (not just keywords):
-    - Verifies database service actually became healthy
-    - Verifies error_rate actually dropped below threshold
-    - Penalizes unnecessary restarts of healthy services
-    - Rewards efficiency (fewer steps)
-    """
-    rewards = []
+    score = 0.0
+    if _value(services.get("postgres-primary")) == "healthy":
+        score += 0.35
+    if _value(services.get("auth-service")) == "healthy" and _value(services.get("billing-service")) == "healthy":
+        score += 0.15
+    if metrics.get("error_rate", 1.0) <= 0.05 and metrics.get("p99_latency_ms", 9999) <= 600:
+        score += 0.2
+    if set(["inspect:postgres-primary", "query_metrics", "query_logs", "run_health_check:postgres-primary"]).issubset(set(incident.get("evidence_collected", []))):
+        score += 0.1
+    if "restart_service:postgres-primary" in incident.get("mitigations_applied", []):
+        score += 0.1
+    if incident.get("artifact_status", {}).get("runbook_attached"):
+        score += 0.03
+    if incident.get("artifact_status", {}).get("rca") and incident.get("artifact_status", {}).get("postmortem"):
+        score += 0.04
+    if sla.get("verified") and sla.get("current_status") == "CURRENTLY_MET":
+        score += 0.03
 
-    # 1. ACTION VALIDATION: Check if correct service was restarted
-    db_restarted = False
-    unnecessary_restarts = 0
+    penalty = 0.0
+    penalty += 0.1 * _count_unnecessary_restarts(action_history, "postgres-primary")
+    penalty += 0.05 * len(incident.get("unnecessary_restarts", []))
+    penalty += 0.03 * incident.get("ignored_alert_ticks", 0)
 
-    for a in action_history:
-        act_str = str(a).lower()
+    return max(0.0, min(1.0, round(score - penalty, 4)))
 
-        # Anti-exploit: skip keyword-stuffed actions
-        if _is_keyword_stuffed(act_str):
-            continue
 
-        if 'restart' in act_str:
-            if 'db' in act_str or 'database' in act_str or 'postgres' in act_str:
-                db_restarted = True
-                rewards.append(0.4)  # Correct diagnosis
-            else:
-                # Restarted wrong service (api-core, worker, auth, etc.)
-                unnecessary_restarts += 1
-                rewards.append(-0.15)  # Penalty for wrong action
-
-    # 2. STATE VALIDATION: Did the fix actually work?
-    services = final_state.get('services', {})
-    metrics = final_state.get('metrics', {})
-    error_rate = metrics.get('error_rate', 1.0)
-
-    # Check postgres is now healthy (backwards compatible with 'database')
-    db_status = services.get('postgres', services.get('database', 'unknown'))
-    if db_status == 'healthy':
-        rewards.append(0.3)  # Database recovered
-
-    # Check error_rate improved
-    if error_rate < 0.05:
-        rewards.append(0.3)  # System recovered
-
-    # 3. EFFICIENCY BONUS/PENALTY
-    steps_taken = len(action_history)
-    if steps_taken <= 3:
-        rewards.append(0.1)  # Bonus for optimal solution
-    elif steps_taken > 5:
-        penalty = (steps_taken - 5) * 0.05
-        rewards.append(-penalty)
-
-    max_reward = 1.0
-    score = sum(rewards) / max_reward
-
-    return max(0.0, min(1.0, score))
-
-# Aliases for external consumers
 grade_task_1 = grade
-_is_stuffed = _is_keyword_stuffed
