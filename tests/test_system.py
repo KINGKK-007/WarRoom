@@ -93,6 +93,14 @@ class TestProductionTopology:
         assert len(env.state["incident"]["root_causes"]) >= 5
         assert env.state["incident"]["severity"] == "sev0"
 
+    def test_seeded_variant_is_deterministic(self):
+        env_a = DevOpsWarRoomEnv()
+        env_b = DevOpsWarRoomEnv()
+        env_a.reset(Scenario.MEDIUM, seed=123)
+        env_b.reset(Scenario.MEDIUM, seed=123)
+        assert env_a.state["incident"]["variant"] == env_b.state["incident"]["variant"]
+        assert env_a.state["incident"]["required_mitigations"] == env_b.state["incident"]["required_mitigations"]
+
 
 class TestRoleVisibility:
     def test_sre_sees_metrics_logs_traces(self):
@@ -158,6 +166,32 @@ class TestIncidentMechanics:
         env.reset(Scenario.CHAOS)
         env.state["sla"]["breaches"] = [{"tick": 0}, {"tick": 1}, {"tick": 2}]
         assert env._is_done() is True
+
+    def test_rca_contains_causal_chain_and_blast_radius(self):
+        env = DevOpsWarRoomEnv()
+        env.reset(Scenario.HARD)
+        for command in [
+            "acknowledge alert",
+            "query metrics",
+            "query traces",
+            "query topology",
+            "inspect api-gateway",
+            "switch role Dev",
+            "query deploy history",
+            "rollback api-gateway v3.2.0",
+            "attach runbook",
+            "switch role SRE",
+            "failover zone us-east-1c",
+            "rebalance traffic api-gateway",
+            "restore zone us-east-1c",
+            "verify sla",
+            "run rca",
+        ]:
+            _run(env, command)
+        rca = env.state["incident"]["rca"]
+        assert "causal_chain" in rca
+        assert "blast_radius" in rca
+        assert isinstance(env.timeline(), list)
 
 
 class TestValidationBenchmark:

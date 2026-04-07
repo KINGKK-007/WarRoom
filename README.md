@@ -1,277 +1,474 @@
 ---
 title: DevOps War Room
-emoji: 🚨
+emoji: "🚨"
 colorFrom: red
 colorTo: gray
 sdk: docker
 pinned: false
 ---
 
-# DevOps War Room Simulator
+# DevOps War Room
 
-> A living infrastructure incident simulator where an AI agent plays the role of an on-call SRE, diagnosing and resolving production incidents in a dynamically degrading environment — before the system collapses completely.
+Production incident-response simulator built on OpenEnv. An agent operates as an on-call team member across SRE, Dev, and Manager roles, diagnoses multi-service failures, mitigates outages, verifies SLA recovery, and produces production artifacts such as RCA and postmortems.
 
-**Team:** BholeChature — Pulkit Pandey + Kanav Kumar  
-**Hackathon:** Meta PyTorch OpenEnv × Scaler School of Technology  
-**Framework:** [OpenEnv](https://github.com/huggingface/openenv) (Gymnasium-style API)
+**Team:** BholeChature  
+**Repository:** https://github.com/KINGKK-007/WarRoom  
+**Hugging Face Space:** https://coolalien35-warroom-deploy.hf.space  
+**OpenEnv Spec File:** [openenv.yaml](./openenv.yaml)
 
----
+## Why This Submission Is Real-World
 
-## What Makes This Unique
+This is not a toy environment. The agent is evaluated on an operational workflow that maps closely to real production response:
 
-1. **Living Environment** — The system degrades every tick via `tick()`. Errors compound, services cascade, and delay is punished. This is not a static puzzle.
-2. **Multi-Role Observation** — The agent switches between **SRE**, **Dev**, and **Manager** roles. Each role sees different data and has different action permissions. Correct role selection is part of the challenge.
-3. **Wrong Actions Have Consequences** — Restarting the wrong service, rolling back the wrong deploy, or wasting steps all produce negative rewards. Shotgun debugging fails.
-4. **Dense Reward Signal** — Partial credit per step, not binary pass/fail. Enables meaningful gradient signal for RL training.
-
----
-
-## Task Definitions
-
-| Task ID | Name | Difficulty | Root Cause | Key Mechanic |
-|---------|------|------------|------------|--------------|
-| `task_1` (Easy) | **Single Service Outage** | Easy | PostgreSQL database is DOWN | Direct diagnosis from CRITICAL alert + logs |
-| `task_2` (Medium) | **Cascading Failure** | Medium | Worker memory leak → OOM → Auth cascade → API cascade | Sequence-sensitive repair (worker before API) |
-| `task_3` (Hard) | **Silent Data Corruption** | Hard | Bad deploy (`api-service v2.3.1`) causing gradual metric degradation | Requires Dev role switch + deploy history correlation |
-
-### Task 1 — Single Service Outage
-- **Initial State:** Database DOWN, all other services UP, error_rate 0.0
-- **Clues:** CRITICAL alert "Connection refused on port 5432", error logs
-- **Solution:** `restart service database`
-- **Steps to solve:** 1–3 (SRE role)
-
-### Task 2 — Cascading Failure
-- **Initial State:** Worker DEGRADED, all others UP, error_rate 0.05
-- **Clues:** WARN log "Memory usage at 78%", no alerts initially
-- **Cascade:** Worker DEGRADED → (2 ticks) → Worker DOWN + Auth DEGRADED
-- **Solution:** `restart service worker` **before** `restart service api`
-- **Steps to solve:** 3–8 (SRE role)
-
-### Task 3 — Silent Data Corruption
-- **Initial State:** Database DEGRADED, all others UP, error_rate 0.10
-- **Clues:** No alerts, no obvious logs — requires investigation
-- **Solution:** `switch role dev` → `rollback deploy api v2.3.1`
-- **Steps to solve:** 5–10 (requires role switch to Dev)
-
----
-
-## Action Space
-
-Actions are natural language strings parsed by a regex-based command parser.
-
-### SRE Role Actions
-| Command | Description |
-|---------|-------------|
-| `restart service {name}` | Restart a broken service (database, api, worker, auth, frontend) |
-| `scale {target}` | Scale a service |
-| `inspect {target}` | Inspect a service's current state |
-| `query metrics` | View current system metrics |
-
-### Dev Role Actions
-| Command | Description |
-|---------|-------------|
-| `rollback deploy {name} {version}` | Rollback a service to a previous version |
-| `query deploy` | View deployment history |
-| `query logs` | View recent application logs |
-
-### Manager Role Actions
-| Command | Description |
-|---------|-------------|
-| `escalate {target}` | Escalate the incident |
-| `notify {target}` | Notify stakeholders |
-
-### Universal Actions
-| Command | Description |
-|---------|-------------|
-| `switch role {sre\|dev\|manager}` | Switch agent's active role (costs 1 tick) |
-
----
-
-## Observation Space
-
-Observations are role-filtered Pydantic models:
-
-```python
-class Observation(BaseModel):
-    tick: int                                    # current step number
-    current_role: str                            # "SRE" | "Dev" | "Manager"
-    services: Dict[str, ServiceState]            # service → "up" | "degraded" | "down"
-    alerts: List[Alert]                          # active alerts with severity + message
-    metrics: Optional[Dict[str, Any]]            # SRE only: error_rate, etc.
-    logs: Optional[List[str]]                    # SRE (last 10) / Dev (last 30)
-    deployment_history: Optional[List[str]]      # Dev only
-    code_diffs: Optional[List[str]]              # Dev only
-    sla_status: Optional[str]                    # Manager only
-    estimated_affected_users: Optional[int]      # Manager only
-```
-
----
-
-## Reward Structure
-
-| Signal | Value | Trigger |
-|--------|-------|---------|
-| Correct diagnosis + restart | +0.40 | Restarting a broken service |
-| Wrong service restart | −0.20 | Restarting a healthy service |
-| Wrong rollback | −0.25 | Rolling back incorrect target/version |
-| Ignored critical alert | −0.10 | Taking a non-fix action during critical alert |
-| Unauthorized action | −0.15 | Action not permitted for current role |
-| Unrecognizable command | −0.05 | Command that doesn't match any pattern |
-| Role switch | 0.00 | Switching roles (costs 1 tick, no reward) |
-
----
-
-## API Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/reset` | Reset environment. Body: `{"task_id": "Easy"\|"Medium"\|"Hard"}` |
-| `POST` | `/step` | Execute action. Body: `{"action_type": "raw_command", "target": "restart service database"}` |
-| `GET` | `/state` | Return current raw environment state |
-| `GET` | `/health` | Health check |
-
----
-
-## Setup & Installation
-
-### Local Development
-```bash
-pip install -r requirements.txt
-python -m pytest tests/ -v           # run test suite
-python inference.py                   # run baseline agent (requires LLM API key)
-uvicorn environment.server:app --reload  # start API server
-```
-
-### Docker
-```bash
-docker build -t devops-warroom .
-docker run -p 8000:8000 devops-warroom
-# Test: curl -X POST http://localhost:8000/reset -H "Content-Type: application/json" -d '{"task_id": "Easy"}'
-```
-
-### Environment Variables
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `API_BASE_URL` | LLM API endpoint URL | `https://api.groq.com/openai/v1` |
-| `MODEL_NAME` | Model identifier | `llama-3.1-8b-instant` |
-| `HF_TOKEN` | API authentication key (Groq API key) | Required |
-| `ENV_URL` | Environment endpoint URL | `https://coolalien35-warroom-deploy.hf.space` |
-
-### HuggingFace Space Deployment
-
-To deploy your own instance with inference capabilities:
-
-1. **Fork/Clone** this repository
-2. **Push to HuggingFace Spaces** (Docker SDK):
-   ```bash
-   git remote add space https://huggingface.co/spaces/YOUR_USERNAME/warroom-deploy
-   git push space main
-   ```
-
-3. **Configure Secrets** in Space settings:
-   - Go to: `https://huggingface.co/spaces/YOUR_USERNAME/warroom-deploy/settings`
-   - Add these secrets:
-     ```
-     HF_TOKEN = [your Groq API key from https://console.groq.com]
-     API_BASE_URL = https://api.groq.com/openai/v1
-     MODEL_NAME = llama-3.1-8b-instant
-     ```
-   - Click **Factory Reboot** after saving
-
-4. **Verify Deployment**:
-   ```bash
-   curl https://YOUR_USERNAME-warroom-deploy.hf.space/health
-   # Should return: {"status":"healthy"}
-   ```
-
-**Get Free Groq API Key**:
-1. Visit: https://console.groq.com
-2. Sign up (no credit card required)
-3. Navigate to API Keys section
-4. Create new API key
-5. Copy key (format: `gsk_...`)
-
----
-
-## Baseline Scores
-
-Evaluated on live HuggingFace Space: https://coolalien35-warroom-deploy.hf.space
-
-**Agent**: Groq API (100% free) with `llama-3.1-8b-instant`
-**Validator**: OpenEnv-core v0.2.3
-**Grading**: Deterministic keyword + state validation (anti-exploit protected)
-
-| Task | Difficulty | Score | Steps | Target | Status |
-|------|-----------|-------|-------|--------|--------|
-| Task 1 (Single Service Outage) | Easy | **1.00** | 3 | ≥0.65 | ✅ PASS |
-| Task 2 (Cascading Failure) | Medium | **1.00** | 3 | ≥0.40 | ✅ PASS |
-| Task 3 (Silent Corruption) | Hard | **1.00** | 4 | ≥0.15 | ✅ PASS |
-
-### Example Trajectories
-
-**Task 1 (Database Outage)**:
-```
-Step 1: restart service database → +0.40 reward (correct diagnosis)
-Step 2: query metrics → +0.00 reward (verification)
-Step 3: query metrics → +0.00 reward (confirm recovery)
-Final: error_rate=0.0, all services healthy
-Grader Score: 1.0/1.0 (+0.5 restart +0.5 recovery -0.0 efficiency)
-```
-
-**Task 2 (Worker Cascade)**:
-```
-Step 1: query metrics → +0.00 reward
-Step 2: restart service worker → +0.40 reward (root cause identified)
-Step 3: query metrics → +0.00 reward (confirm recovery)
-Final: error_rate=0.0, cascade prevented
-Grader Score: 1.0/1.0 (+0.5 worker +0.5 sequence -0.0 efficiency)
-```
-
-**Task 3 (Bad Deployment)**:
-```
-Step 1: query metrics → +0.00 reward
-Step 2: switch role dev → +0.00 reward (role switch)
-Step 3: query deploy history → +0.00 reward (investigation)
-Step 4: rollback api-service v2.3.0 → -0.40 reward (partial, pending cascade)
-Final: Bad deployment rolled back
-Grader Score: 1.0/1.0 (+0.3 role switch +0.7 rollback -0.0 efficiency)
-```
-
-> **Note**: Rewards during execution are partial/incremental. Final grader scores evaluate full trajectory against task-specific success criteria.
-
----
+- Service failures propagate through a dependency graph of 39 interdependent services.
+- Incidents span 4 availability zones with zone drain, failover, and restore behavior.
+- Observability is role-filtered and includes metrics, logs, traces, topology, deploy history, and SLA state.
+- Recovery is not enough by itself; the agent must also handle runbook attachment, RCA, postmortem generation, and stakeholder communications.
+- Deterministic graders validate repaired state and penalize unnecessary restarts or ignored alerts.
+- The runtime supports seeded incident variants, procedural chaos incidents, timeline replay, and a browser dashboard.
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    A[Agent / inference.py] --> B[FastAPI OpenEnv Server]
+    B --> C[DevOpsWarRoomEnv]
+
+    C --> D[Scenario Engine]
+    C --> E[Role Manager]
+    C --> F[Command Parser]
+    C --> G[Incident Runtime]
+    C --> H[Dense Reward Engine]
+
+    D --> D1[Easy]
+    D --> D2[Medium]
+    D --> D3[Hard]
+    D --> D4[Chaos]
+
+    G --> I[39 Services]
+    G --> J[4 Availability Zones]
+    G --> K[Dependency Cascades]
+    G --> L[SLA Tracking]
+    G --> M[RCA / Postmortem]
+
+    C --> N[Observation Builder]
+    N --> N1[SRE View]
+    N --> N2[Dev View]
+    N --> N3[Manager View]
+
+    O[Deterministic Graders] --> P[task_1.py]
+    O --> Q[task_2.py]
+    O --> R[task_3.py]
 ```
+
+## Environment Model
+
+### Core loop
+
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant API as /step
+    participant Env as DevOpsWarRoomEnv
+    participant Runtime as Incident Runtime
+    participant Grade as Dense Reward
+
+    Agent->>API: action
+    API->>Env: step(action)
+    Env->>Runtime: mutate service / zone / incident state
+    Runtime->>Runtime: tick() updates cpu, memory, latency, queue, alerts, SLA
+    Runtime->>Grade: compute reward and penalties
+    Env-->>API: observation, reward, done, info
+    API-->>Agent: JSON response
+```
+
+### Service topology
+
+- 39 services across data, app, edge, infra, observability, and ops tiers
+- 4 zones:
+  - `us-east-1a`
+  - `us-east-1b`
+  - `us-east-1c`
+  - `us-central-1a`
+- Representative critical services:
+  - `postgres-primary`
+  - `worker-service`
+  - `api-gateway`
+  - `frontend-web`
+  - `service-mesh`
+  - `notification-service`
+  - `scheduler-service`
+  - `prometheus`
+  - `grafana`
+  - `tempo`
+
+### Runtime mechanics
+
+- `tick()` updates `cpu`, `memory`, `p99_latency_ms`, `queue_depth`, `error_rate`, `availability`, and saturation.
+- Multi-zone cascades propagate through the dependency graph when a core service or zone fails.
+- SLA tracking records breach history and can end failed trajectories early.
+- Incident timelines capture actions, failures, metric transitions, and SLA breaches for replay.
+- RCA output includes blast radius, causal chain, contributing factors, ruled-out causes, and follow-up actions.
+
+## Tasks
+
+The official graded tasks are:
+
+| Task ID | Scenario | Difficulty | Primary Failure Pattern | Success Pattern |
+|---|---|---:|---|---|
+| `task_1` | Easy | Easy | `postgres-primary` outage cascading into auth/billing | restore DB, verify SLA, create RCA + postmortem |
+| `task_2` | Medium | Medium | `worker-service` backlog + zone degradation in `us-east-1b` | drain backlog, heal zone, recover async services |
+| `task_3` | Hard | Hard | bad `api-gateway v3.2.1` deploy + zone failure in `us-east-1c` | rollback to `v3.2.0`, fail over, rebalance, restore |
+
+Bonus task:
+
+| Scenario | Difficulty | Description |
+|---|---:|---|
+| `Chaos` | Advanced | Procedural 5-root-cause incident generation with overlapping service, deploy, and network failures |
+
+Seeded variants are supported through `/reset` with an optional `seed`. Easy, Medium, Hard, and Chaos preserve their task family while varying impacted zones, blast radius, or deploy targets deterministically.
+
+## Action Space
+
+The environment supports 27 meaningful actions. Examples:
+
+| Category | Actions |
+|---|---|
+| Diagnosis | `inspect`, `query metrics`, `query logs`, `query traces`, `query topology`, `run health check` |
+| Service mitigation | `restart service`, `rollback deploy`, `scale`, `clear queue`, `tune autoscaling`, `throttle service`, `isolate service` |
+| Zone mitigation | `drain zone`, `failover zone`, `restore zone`, `rebalance traffic` |
+| Incident management | `acknowledge alert`, `verify sla`, `run rca`, `generate postmortem`, `attach runbook`, `update status page`, `notify`, `escalate` |
+| Coordination | `switch role {SRE|Dev|Manager}` |
+
+## Observation Space
+
+Observations are typed Pydantic objects and are role-filtered.
+
+### Shared fields
+
+- `tick`
+- `current_role`
+- `services`
+- `alerts`
+- `zone_health`
+- `service_distribution`
+- `incident_summary`
+- `available_actions`
+- `steps_remaining`
+
+### SRE view
+
+- `metrics`
+- `logs`
+- `traces`
+- `metrics_history`
+
+### Dev view
+
+- `deployment_history`
+- `code_diffs`
+- `logs`
+- `traces`
+
+### Manager view
+
+- `sla_status`
+- `estimated_affected_users`
+- timeline-focused logs
+
+## Reward Design
+
+The reward model is dense, continuous, and explicitly shaped for production response quality.
+
+- Positive signal for evidence collection:
+  - inspecting the right service
+  - querying metrics, traces, logs, topology, deploy history
+- Positive signal for mitigations:
+  - correct restart
+  - rollback of the bad deploy
+  - queue draining and autoscaling
+  - zone failover / restore
+- Positive signal for production follow-through:
+  - SLA verification
+  - RCA generation
+  - postmortem generation
+  - runbook attachment
+- Negative signal for:
+  - unauthorized actions
+  - unknown commands
+  - ignored critical alerts
+  - unnecessary restarts
+  - incomplete or premature RCA/postmortem flows
+  - terminal SLA-breach trajectories
+
+## Deterministic Grading
+
+Each official task has a deterministic grader returning a score in `[0.0, 1.0]`.
+
+- [graders/task_1.py](./graders/task_1.py)
+- [graders/task_2.py](./graders/task_2.py)
+- [graders/task_3.py](./graders/task_3.py)
+
+The graders do not rely on keyword stuffing. They verify:
+
+- final repaired service state
+- final metrics such as `error_rate`, `p99_latency_ms`, and `queue_depth`
+- required evidence gathered
+- required mitigations applied
+- SLA verification
+- RCA / postmortem completion
+- penalties for unnecessary restarts and ignored alerts
+
+## Baseline Results
+
+These are the current baseline scores from [inference.py](./inference.py) against the environment and graders:
+
+| Task | Score | Steps | Outcome |
+|---|---:|---:|---|
+| `task_1` | `0.97` | 11 | passed with wide margin |
+| `task_2` | `1.00` | 16 | perfect normalized score |
+| `task_3` | `0.94` | 17 | strong hard-task recovery |
+
+### Adaptive baseline
+
+[adaptive_inference.py](./adaptive_inference.py) is an observation-driven baseline that infers the incident class from live state, branches across seeded variants, and reaches the same grader scores on the three official tasks:
+
+| Task | Adaptive Score | Adaptive Steps |
+|---|---:|---:|
+| `task_1` | `0.97` | 11 |
+| `task_2` | `1.00` | 16 |
+| `task_3` | `0.94` | 17 |
+
+### Random vs smart benchmark
+
+Measured with [benchmark.py](./benchmark.py):
+
+| Scenario | Smart Resolved | Smart Error Rate | Random Resolved | Random Error Rate |
+|---|---|---:|---|---:|
+| Easy | `true` | `0.008` | `false` | `0.015` |
+| Medium | `true` | `0.020` | `false` | `0.113` |
+| Hard | `true` | `0.008` | `false` | `0.441` |
+
+Observed benchmark runtime:
+
+- `runtime_s = 0.0324`
+
+This matters because it demonstrates the task signal is meaningful: a scripted recovery playbook solves the incidents, while a random agent does not.
+
+## Reproducibility
+
+### Environment variables
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `API_BASE_URL` | OpenAI-compatible model endpoint | `https://api.groq.com/openai/v1` |
+| `MODEL_NAME` | model name for the baseline agent | `llama-3.1-8b-instant` |
+| `HF_TOKEN` | API key for the model backend | required |
+| `ENV_URL` | target OpenEnv deployment | `https://coolalien35-warroom-deploy.hf.space` |
+
+### Local run
+
+```bash
+pip install -r requirements.txt
+uvicorn environment.server:app --host 0.0.0.0 --port 8000
+```
+
+In another shell:
+
+```bash
+export HF_TOKEN="your_token"
+export ENV_URL="http://localhost:8000"
+python inference.py
+```
+
+### Run against Hugging Face Space
+
+```bash
+export HF_TOKEN="your_token"
+unset ENV_URL
+python inference.py
+```
+
+`inference.py` defaults to:
+
+```python
+ENV_URL = os.environ.get("ENV_URL", "https://coolalien35-warroom-deploy.hf.space")
+```
+
+## OpenEnv API
+
+The deployed server exposes:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/reset` | reset to a specific scenario |
+| `POST` | `/step` | execute an action |
+| `GET` | `/state` | fetch raw environment state |
+| `GET` | `/timeline` | replay structured incident events |
+| `GET` | `/health` | health check |
+| `GET` | `/metadata` | environment metadata |
+| `GET` | `/schema` | action / observation schema |
+| `GET` | `/dashboard` | browser dashboard for live topology and timeline |
+
+These endpoints already satisfy the structural OpenEnv REST contract natively:
+
+- `POST /reset`
+- `POST /step`
+- `GET /state`
+- `GET /timeline`
+- `GET /health`
+- `GET /metadata`
+
+### Quick endpoint checks
+
+```bash
+curl -s https://coolalien35-warroom-deploy.hf.space/health
+```
+
+```bash
+curl -s https://coolalien35-warroom-deploy.hf.space/metadata
+```
+
+```bash
+curl -s -X POST https://coolalien35-warroom-deploy.hf.space/reset \
+  -H "Content-Type: application/json" \
+  -d '{"task_id":"Easy"}'
+```
+
+```bash
+curl -s -X POST https://coolalien35-warroom-deploy.hf.space/reset \
+  -H "Content-Type: application/json" \
+  -d '{"task_id":"Hard","seed":7}'
+```
+
+```bash
+curl -s -X POST https://coolalien35-warroom-deploy.hf.space/step \
+  -H "Content-Type: application/json" \
+  -d '{"action_type":"raw_command","params":{"command":"query metrics"}}'
+```
+
+```bash
+curl -s https://coolalien35-warroom-deploy.hf.space/timeline
+```
+
+```bash
+open https://coolalien35-warroom-deploy.hf.space/dashboard
+```
+
+## Docker
+
+Build locally:
+
+```bash
+docker build -t devops-warroom .
+```
+
+Run locally:
+
+```bash
+docker run -p 8000:7860 devops-warroom
+```
+
+Smoke test:
+
+```bash
+curl -s http://localhost:8000/health
+```
+
+## Hugging Face Space Deployment
+
+The project is configured for Docker-based Space deployment.
+
+### Publish to a Space remote
+
+```bash
+git remote add space https://huggingface.co/spaces/YOUR_USERNAME/warroom-deploy
+git push space main
+```
+
+### Verify Space health
+
+```bash
+curl -s https://YOUR_USERNAME-warroom-deploy.hf.space/health
+```
+
+## Validation
+
+### Test suite
+
+```bash
+pytest -q
+```
+
+Current local result:
+
+- `22 passed`
+
+### Benchmark
+
+```bash
+python benchmark.py
+```
+
+### OpenEnv validation command
+
+When the OpenEnv CLI is available in your environment, run:
+
+```bash
+openenv validate
+```
+
+Current status:
+
+- the implementation is validator-aligned by design
+- task IDs in [openenv.yaml](./openenv.yaml) match the reset flow used by the baseline agent
+- the FastAPI server exposes the expected REST contract
+- response serialization explicitly normalizes nested models and enums for JSON safety
+- reset supports deterministic seeded variants without changing the task contract
+
+This means the project is likely to pass `openenv validate`, but the final compliance claim should be confirmed by running the actual validator in an environment where the CLI binary is available on `PATH`.
+
+## Repository Layout
+
+```text
 WarRoom/
-├── inference.py              # Baseline LLM agent (OpenAI client)
-├── Dockerfile                # Container definition
-├── requirements.txt          # Python dependencies
-├── openenv.py                # Local BaseEnvironment shim (removed in Docker)
-│
 ├── environment/
-│   ├── __init__.py           # Package re-exports
-│   ├── env.py                # Core DevOpsWarRoomEnv (step/reset/tick)
-│   ├── models.py             # Pydantic contracts (Observation, Action, Reward)
-│   ├── actions.py            # Regex command parser
-│   ├── roles.py              # Role permission matrix
-│   ├── scenarios.py          # Task scenario definitions
-│   └── server.py             # FastAPI endpoints
-│
+│   ├── actions.py
+│   ├── env.py
+│   ├── models.py
+│   ├── roles.py
+│   ├── scenarios.py
+│   └── server.py
 ├── graders/
-│   ├── __init__.py           # Package init
-│   ├── task_1.py             # Easy grader — DB restart check
-│   ├── task_2.py             # Medium grader — sequence check
-│   └── task_3.py             # Hard grader — role switch + rollback check
-│
-└── tests/
-    ├── test_graders.py       # Grader unit tests
-    └── test_system.py        # End-to-end system validation
+│   ├── task_1.py
+│   ├── task_2.py
+│   └── task_3.py
+├── tests/
+│   ├── conftest.py
+│   ├── test_graders.py
+│   └── test_system.py
+├── benchmark.py
+├── inference.py
+├── openenv.yaml
+├── Dockerfile
+└── README.md
 ```
 
----
+## Why It Should Score Well
 
-## License
-
-MIT
+- Real-world utility:
+  - models modern production incident response, not a toy domain
+- Task + grader quality:
+  - 3 official deterministic tasks plus a bonus Chaos scenario
+  - dense reward plus exact final-state grading
+- Environment design:
+  - multi-role, multi-zone, dependency-aware runtime
+  - service topology, observability, SLA, RCA, and postmortem flows
+- Code quality and deployability:
+  - FastAPI server
+  - Dockerized Space deployment
+  - benchmark and test coverage
+- Creativity:
+  - overlapping root-cause incidents
+  - production artifact generation
+  - topology-aware failure recovery

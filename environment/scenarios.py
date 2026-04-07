@@ -1,6 +1,6 @@
 import copy
 import random
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .models import Alert, AvailabilityZone, Scenario, ServiceState
 
@@ -176,6 +176,7 @@ def _base_incident() -> Dict[str, Any]:
         "severity": "none",
         "recovery_tick": None,
         "timeline": [],
+        "events": [],
         "ignored_alert_ticks": 0,
         "unnecessary_restarts": [],
         "pending_failures": [],
@@ -228,6 +229,17 @@ def _append_incident_timeline(state: Dict[str, Any], entry: str):
     state["incident"]["timeline"].append(entry)
 
 
+def _append_incident_event(state: Dict[str, Any], event_type: str, summary: str, payload: Optional[Dict[str, Any]] = None):
+    state["incident"].setdefault("events", []).append(
+        {
+            "tick": 0,
+            "type": event_type,
+            "summary": summary,
+            "payload": payload or {},
+        }
+    )
+
+
 def _easy_scenario() -> Dict[str, Any]:
     state = _build_base_state()
     for zone in state["service_details"]["postgres-primary"]["zones"]:
@@ -267,6 +279,7 @@ def _easy_scenario() -> Dict[str, Any]:
         }
     )
     _append_incident_timeline(state, "tick=0 incident opened: primary database outage")
+    _append_incident_event(state, "incident_opened", "Primary database outage detected.", {"root_causes": ["postgres-primary"]})
     return state
 
 
@@ -312,6 +325,7 @@ def _medium_scenario() -> Dict[str, Any]:
         }
     )
     _append_incident_timeline(state, "tick=0 incident opened: worker backlog and zone degradation")
+    _append_incident_event(state, "incident_opened", "Worker backlog and zone degradation detected.", {"root_causes": ["worker-service", "us-east-1b"]})
     return state
 
 
@@ -369,6 +383,7 @@ def _hard_scenario() -> Dict[str, Any]:
         }
     )
     _append_incident_timeline(state, "tick=0 incident opened: bad deploy plus zone outage")
+    _append_incident_event(state, "incident_opened", "Bad api-gateway deploy and zone outage detected.", {"root_causes": ["api-gateway", "us-east-1c"]})
     return state
 
 
@@ -445,7 +460,75 @@ def generate_procedural_incident(seed: int = 20260407) -> Dict[str, Any]:
     state["metrics"].update({"error_rate": 0.31, "p99_latency_ms": 2860, "requests_per_sec": 380, "availability": 95.2, "saturation": 0.97, "queue_depth": 36000})
     state["estimated_affected_users"] = 22400
     _append_incident_timeline(state, f"tick=0 chaos incident generated seed={seed}")
+    _append_incident_event(state, "incident_opened", "Procedural chaos incident generated.", {"seed": seed, "root_causes": root_causes})
     return state
+
+
+def generate_variant(task_id: Scenario, seed: int) -> Dict[str, Any]:
+    if task_id == Scenario.CHAOS:
+        return generate_procedural_incident(seed=seed)
+
+    rng = random.Random(seed)
+    if task_id == Scenario.EASY:
+        state = _easy_scenario()
+        impacted = rng.choice(["auth-service", "billing-service", "user-service"])
+        state["services"][impacted] = ServiceState.degraded
+        state["logs"].append({"tick": 0, "service": impacted, "level": "ERROR", "message": f"variant cascade observed in {impacted}"})
+        state["incident"]["summary"] = f"Seeded variant: postgres-primary outage with elevated impact on {impacted}."
+        state["incident"]["variant"] = {"seed": seed, "focus_service": impacted}
+        return state
+
+    if task_id == Scenario.MEDIUM:
+        state = _medium_scenario()
+        zone = rng.choice(["us-east-1a", "us-east-1b", "us-east-1c"])
+        queue_depth = rng.choice([18000, 22000, 30000])
+        state["zones"]["us-east-1b"]["status"] = "healthy"
+        state["zones"]["us-east-1b"]["packet_loss"] = 0.0
+        state["zones"]["us-east-1b"]["latency_ms"] = 12
+        state["zones"][zone]["status"] = "degraded"
+        state["zones"][zone]["packet_loss"] = 0.06
+        state["zones"][zone]["latency_ms"] = 58
+        state["service_details"]["worker-service"]["queue_depth"] = queue_depth
+        state["incident"]["zone_targets"] = [zone]
+        state["incident"]["required_mitigations"] = [
+            "clear_queue:worker-service",
+            "scale:worker-service",
+            "tune_autoscaling:worker-service",
+            f"drain_zone:{zone}",
+            f"restore_zone:{zone}",
+        ]
+        state["incident"]["summary"] = f"Seeded variant: worker backlog with zone degradation in {zone}."
+        state["incident"]["variant"] = {"seed": seed, "focus_zone": zone, "queue_depth": queue_depth}
+        return state
+
+    if task_id == Scenario.HARD:
+        state = _hard_scenario()
+        zone = rng.choice(["us-east-1a", "us-east-1b", "us-east-1c"])
+        deploy_target = rng.choice(["api-gateway", "frontend-web"])
+        good_version = "v3.2.0" if deploy_target == "api-gateway" else "v5.0.4"
+        for z in state["zones"]:
+            state["zones"][z]["status"] = "healthy"
+            state["zones"][z]["packet_loss"] = 0.0
+            state["zones"][z]["latency_ms"] = 12
+        state["zones"][zone]["status"] = "down"
+        state["zones"][zone]["packet_loss"] = 0.34
+        state["zones"][zone]["latency_ms"] = 280
+        state["incident"]["zone_targets"] = [zone]
+        state["incident"]["deploy_targets"] = {deploy_target: good_version}
+        if deploy_target != "api-gateway":
+            state["service_details"]["frontend-web"]["version"] = "v5.0.5-bad"
+            state["services"]["frontend-web"] = ServiceState.degraded
+            state["incident"]["service_targets"] = [deploy_target]
+            state["incident"]["required_evidence"] = ["query_metrics", "query_traces", "query_deploy", "query_topology", "inspect:frontend-web"]
+            state["incident"]["required_mitigations"] = [f"rollback_deploy:{deploy_target}", f"failover_zone:{zone}", f"rebalance_traffic:{deploy_target}"]
+        else:
+            state["service_details"]["api-gateway"]["zone_states"][zone] = ServiceState.down
+            state["incident"]["required_mitigations"] = [f"rollback_deploy:{deploy_target}", f"failover_zone:{zone}", f"rebalance_traffic:{deploy_target}"]
+        state["incident"]["summary"] = f"Seeded variant: bad deploy on {deploy_target} with zone outage in {zone}."
+        state["incident"]["variant"] = {"seed": seed, "focus_zone": zone, "deploy_target": deploy_target}
+        return state
+
+    return copy.deepcopy(SCENARIOS[task_id])
 
 
 SCENARIOS: Dict[Scenario, Dict[str, Any]] = {
