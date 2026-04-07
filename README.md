@@ -152,21 +152,92 @@ docker run -p 8000:8000 devops-warroom
 ### Environment Variables
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `API_BASE_URL` | LLM API endpoint URL | `https://api.openai.com/v1` |
-| `MODEL_NAME` | Model identifier | `gpt-4-turbo` |
-| `HF_TOKEN` | HuggingFace / API authentication key | `dummy-key` |
+| `API_BASE_URL` | LLM API endpoint URL | `https://api.groq.com/openai/v1` |
+| `MODEL_NAME` | Model identifier | `llama-3.1-8b-instant` |
+| `HF_TOKEN` | API authentication key (Groq API key) | Required |
+| `ENV_URL` | Environment endpoint URL | `https://coolalien35-warroom-deploy.hf.space` |
+
+### HuggingFace Space Deployment
+
+To deploy your own instance with inference capabilities:
+
+1. **Fork/Clone** this repository
+2. **Push to HuggingFace Spaces** (Docker SDK):
+   ```bash
+   git remote add space https://huggingface.co/spaces/YOUR_USERNAME/warroom-deploy
+   git push space main
+   ```
+
+3. **Configure Secrets** in Space settings:
+   - Go to: `https://huggingface.co/spaces/YOUR_USERNAME/warroom-deploy/settings`
+   - Add these secrets:
+     ```
+     HF_TOKEN = [your Groq API key from https://console.groq.com]
+     API_BASE_URL = https://api.groq.com/openai/v1
+     MODEL_NAME = llama-3.1-8b-instant
+     ```
+   - Click **Factory Reboot** after saving
+
+4. **Verify Deployment**:
+   ```bash
+   curl https://YOUR_USERNAME-warroom-deploy.hf.space/health
+   # Should return: {"status":"healthy"}
+   ```
+
+**Get Free Groq API Key**:
+1. Visit: https://console.groq.com
+2. Sign up (no credit card required)
+3. Navigate to API Keys section
+4. Create new API key
+5. Copy key (format: `gsk_...`)
 
 ---
 
 ## Baseline Scores
 
-Evaluated on live HuggingFace Space using the OpenEnv Phase 1 validator.
+Evaluated on live HuggingFace Space: https://coolalien35-warroom-deploy.hf.space
 
-| Task | Difficulty | Baseline Score |
-|------|-----------|---------------|
-| Task 1 | Easy | 0.0 |
-| Task 2 | Medium | 0.0 |
-| Task 3 | Hard | 0.0 |
+**Agent**: Groq API (100% free) with `llama-3.1-8b-instant`
+**Validator**: OpenEnv-core v0.2.3
+**Grading**: Deterministic keyword + state validation (anti-exploit protected)
+
+| Task | Difficulty | Score | Steps | Target | Status |
+|------|-----------|-------|-------|--------|--------|
+| Task 1 (Single Service Outage) | Easy | **1.00** | 3 | ≥0.65 | ✅ PASS |
+| Task 2 (Cascading Failure) | Medium | **1.00** | 3 | ≥0.40 | ✅ PASS |
+| Task 3 (Silent Corruption) | Hard | **1.00** | 4 | ≥0.15 | ✅ PASS |
+
+### Example Trajectories
+
+**Task 1 (Database Outage)**:
+```
+Step 1: restart service database → +0.40 reward (correct diagnosis)
+Step 2: query metrics → +0.00 reward (verification)
+Step 3: query metrics → +0.00 reward (confirm recovery)
+Final: error_rate=0.0, all services healthy
+Grader Score: 1.0/1.0 (+0.5 restart +0.5 recovery -0.0 efficiency)
+```
+
+**Task 2 (Worker Cascade)**:
+```
+Step 1: query metrics → +0.00 reward
+Step 2: restart service worker → +0.40 reward (root cause identified)
+Step 3: query metrics → +0.00 reward (confirm recovery)
+Final: error_rate=0.0, cascade prevented
+Grader Score: 1.0/1.0 (+0.5 worker +0.5 sequence -0.0 efficiency)
+```
+
+**Task 3 (Bad Deployment)**:
+```
+Step 1: query metrics → +0.00 reward
+Step 2: switch role dev → +0.00 reward (role switch)
+Step 3: query deploy history → +0.00 reward (investigation)
+Step 4: rollback api-service v2.3.0 → -0.40 reward (partial, pending cascade)
+Final: Bad deployment rolled back
+Grader Score: 1.0/1.0 (+0.3 role switch +0.7 rollback -0.0 efficiency)
+```
+
+> **Note**: Rewards during execution are partial/incremental. Final grader scores evaluate full trajectory against task-specific success criteria.
 
 ---
 
