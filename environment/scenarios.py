@@ -20,10 +20,11 @@ SERVICE_DEPENDENCIES: Dict[str, List[str]] = {
     "elasticsearch": [],
     "object-storage": [],
     "config-service": [],
+    "dns-control-plane": [],
     "service-mesh": [],
-    "api-gateway": ["edge-proxy", "service-mesh", "auth-service"],
-    "edge-proxy": ["service-mesh"],
-    "auth-service": ["redis-session", "postgres-primary"],
+    "api-gateway": ["edge-proxy", "service-mesh", "auth-service", "dns-control-plane"],
+    "edge-proxy": ["service-mesh", "dns-control-plane"],
+    "auth-service": ["redis-session", "postgres-primary", "dns-control-plane"],
     "user-service": ["postgres-primary", "redis-cache"],
     "profile-service": ["user-service", "mongodb"],
     "billing-service": ["postgres-primary", "kafka"],
@@ -63,6 +64,7 @@ SERVICE_TIERS: Dict[str, str] = {
     "elasticsearch": "data",
     "object-storage": "infra",
     "config-service": "infra",
+    "dns-control-plane": "infra",
     "service-mesh": "infra",
     "api-gateway": "edge",
     "edge-proxy": "edge",
@@ -387,6 +389,391 @@ def _hard_scenario() -> Dict[str, Any]:
     return state
 
 
+def _easy_redis_scenario() -> Dict[str, Any]:
+    state = _build_base_state()
+    for zone in state["service_details"]["redis-session"]["zones"]:
+        state["service_details"]["redis-session"]["zone_states"][zone] = ServiceState.down
+    state["services"]["redis-session"] = ServiceState.down
+    state["services"]["auth-service"] = ServiceState.degraded
+    state["services"]["cart-service"] = ServiceState.degraded
+    state["services"]["mobile-bff"] = ServiceState.degraded
+    state["metrics"].update({"error_rate": 0.11, "p99_latency_ms": 720, "requests_per_sec": 860, "availability": 98.8, "saturation": 0.76})
+    state["alerts"] = [
+        Alert(severity="CRITICAL", message="redis-session unavailable across session shards", fired_at=0, source="redis-session"),
+        Alert(severity="WARNING", message="auth-service session validation failures rising", fired_at=0, source="auth-service"),
+    ]
+    state["logs"].extend(
+        [
+            {"tick": 0, "service": "redis-session", "level": "ERROR", "message": "session shard timeout on GET session:*"},
+            {"tick": 0, "service": "auth-service", "level": "ERROR", "message": "session lookup failed against redis-session"},
+            {"tick": 0, "service": "cart-service", "level": "WARN", "message": "anonymous cart restore unavailable due to session backend outage"},
+        ]
+    )
+    state["traces"].append({"trace_id": "trc-easy-redis-01", "service": "auth-service", "span": "POST /login", "latency_ms": 1080, "status": "session_backend_down", "zone": "us-east-1a"})
+    state["estimated_affected_users"] = 3600
+    state["incident"].update(
+        {
+            "name": "session-store-outage",
+            "summary": "Redis-backed session storage is down, breaking login and cart restore flows.",
+            "root_causes": ["redis-session"],
+            "service_targets": ["redis-session"],
+            "zone_targets": [],
+            "deploy_targets": {},
+            "required_evidence": ["inspect:redis-session", "query_metrics", "query_logs", "run_health_check:redis-session"],
+            "required_mitigations": ["restart_service:redis-session"],
+            "resolved": False,
+            "severity": "sev2",
+            "needs_manager_comms": True,
+        }
+    )
+    _append_incident_timeline(state, "tick=0 incident opened: session store outage")
+    _append_incident_event(state, "incident_opened", "Redis session store outage detected.", {"root_causes": ["redis-session"]})
+    return state
+
+
+def _medium_kafka_scenario() -> Dict[str, Any]:
+    state = _build_base_state()
+    state["zones"]["us-central-1a"]["status"] = "degraded"
+    state["zones"]["us-central-1a"]["packet_loss"] = 0.12
+    state["zones"]["us-central-1a"]["latency_ms"] = 94
+    state["service_details"]["kafka"]["zone_states"]["us-central-1a"] = ServiceState.down
+    state["service_details"]["worker-service"]["queue_depth"] = 18000
+    state["service_details"]["worker-service"]["cpu"] = 0.89
+    state["service_details"]["worker-service"]["memory"] = 0.82
+    state["services"]["kafka"] = ServiceState.degraded
+    state["services"]["worker-service"] = ServiceState.degraded
+    state["services"]["notification-service"] = ServiceState.degraded
+    state["services"]["analytics-service"] = ServiceState.degraded
+    state["services"]["recommendation-service"] = ServiceState.degraded
+    state["metrics"].update({"error_rate": 0.12, "p99_latency_ms": 880, "requests_per_sec": 820, "queue_depth": 18000, "availability": 98.7, "saturation": 0.9, "cpu": 0.81})
+    state["alerts"] = [
+        Alert(severity="CRITICAL", message="kafka broker partition detected in us-central-1a", fired_at=0, source="kafka"),
+        Alert(severity="WARNING", message="worker-service consumer lag above 15k", fired_at=0, source="worker-service"),
+    ]
+    state["logs"].extend(
+        [
+            {"tick": 0, "service": "kafka", "level": "ERROR", "message": "leader election stalled in us-central-1a partition"},
+            {"tick": 0, "service": "worker-service", "level": "WARN", "message": "consumer lag increasing after kafka broker partition"},
+            {"tick": 0, "service": "notification-service", "level": "WARN", "message": "fanout delivery delayed by upstream kafka instability"},
+        ]
+    )
+    state["traces"].append({"trace_id": "trc-medium-kafka-01", "service": "worker-service", "span": "consume topic notifications", "latency_ms": 1320, "status": "consumer_lag", "zone": "us-central-1a"})
+    state["estimated_affected_users"] = 6400
+    state["incident"].update(
+        {
+            "name": "kafka-broker-partition",
+            "summary": "A kafka broker partition is stalling async consumers and building a worker backlog.",
+            "root_causes": ["kafka", "us-central-1a"],
+            "service_targets": ["kafka", "worker-service"],
+            "zone_targets": ["us-central-1a"],
+            "deploy_targets": {},
+            "required_evidence": ["inspect:kafka", "inspect:worker-service", "query_metrics", "query_logs", "query_traces", "query_topology"],
+            "required_mitigations": ["restart_service:kafka", "clear_queue:worker-service", "scale:worker-service", "drain_zone:us-central-1a", "restore_zone:us-central-1a"],
+            "resolved": False,
+            "severity": "sev2",
+            "pending_failures": [{"kind": "kafka_consumer_stall", "service": "kafka", "trigger_tick": 2}],
+            "needs_manager_comms": True,
+        }
+    )
+    _append_incident_timeline(state, "tick=0 incident opened: kafka broker partition")
+    _append_incident_event(state, "incident_opened", "Kafka broker partition and consumer lag detected.", {"root_causes": ["kafka", "us-central-1a"]})
+    return state
+
+
+def _hard_mesh_scenario() -> Dict[str, Any]:
+    state = _build_base_state()
+    state["service_details"]["service-mesh"]["version"] = "v1.0.1-cert-bug"
+    state["deploy_history"].append({"service": "service-mesh", "version": "v1.0.1-cert-bug", "tick": -1, "status": "success"})
+    state["code_diffs"] = [
+        "--- service-mesh/tls.py",
+        "- certificate_rotation_mode = 'safe'",
+        "+ certificate_rotation_mode = 'aggressive'",
+        "+ strict_peer_validation = True  # breaks legacy sidecars under packet loss",
+    ]
+    state["zones"]["us-east-1a"]["status"] = "down"
+    state["zones"]["us-east-1a"]["packet_loss"] = 0.27
+    state["zones"]["us-east-1a"]["latency_ms"] = 240
+    state["service_details"]["service-mesh"]["zone_states"]["us-east-1a"] = ServiceState.down
+    state["service_details"]["edge-proxy"]["zone_states"]["us-east-1a"] = ServiceState.degraded
+    state["service_details"]["api-gateway"]["zone_states"]["us-east-1a"] = ServiceState.degraded
+    state["service_details"]["frontend-web"]["zone_states"]["us-east-1a"] = ServiceState.degraded
+    state["services"]["service-mesh"] = ServiceState.degraded
+    state["services"]["edge-proxy"] = ServiceState.degraded
+    state["services"]["api-gateway"] = ServiceState.degraded
+    state["services"]["frontend-web"] = ServiceState.degraded
+    state["services"]["mobile-bff"] = ServiceState.degraded
+    state["metrics"].update({"error_rate": 0.19, "p99_latency_ms": 1960, "requests_per_sec": 700, "availability": 98.0, "saturation": 0.93, "cpu": 0.84})
+    state["alerts"] = [
+        Alert(severity="CRITICAL", message="mTLS handshake failures spiking after service-mesh v1.0.1-cert-bug deploy", fired_at=0, source="service-mesh"),
+        Alert(severity="CRITICAL", message="Zone us-east-1a packet loss > 25% impacting edge traffic", fired_at=0, source="us-east-1a"),
+    ]
+    state["logs"].extend(
+        [
+            {"tick": 0, "service": "service-mesh", "level": "ERROR", "message": "peer certificate validation failures after rollout v1.0.1-cert-bug"},
+            {"tick": 0, "service": "api-gateway", "level": "WARN", "message": "upstream connections reset by service-mesh TLS handshake failures"},
+            {"tick": 0, "service": "edge-proxy", "level": "WARN", "message": "east-1a retry burst due to mTLS negotiation instability"},
+        ]
+    )
+    state["traces"].extend(
+        [
+            {"trace_id": "trc-hard-mesh-01", "service": "service-mesh", "span": "mtls handshake", "latency_ms": 1880, "status": "certificate_validation_failure", "zone": "us-east-1a"},
+            {"trace_id": "trc-hard-mesh-02", "service": "frontend-web", "span": "GET /checkout", "latency_ms": 1740, "status": "upstream_tls_error", "zone": "us-east-1a"},
+        ]
+    )
+    state["estimated_affected_users"] = 13200
+    state["incident"].update(
+        {
+            "name": "service-mesh-cert-regression",
+            "summary": "A bad service-mesh rollout and zone failure are causing widespread edge mTLS failures.",
+            "root_causes": ["service-mesh", "us-east-1a"],
+            "service_targets": ["service-mesh", "api-gateway"],
+            "zone_targets": ["us-east-1a"],
+            "deploy_targets": {"service-mesh": "v1.0.0"},
+            "required_evidence": ["query_metrics", "query_traces", "query_deploy", "query_topology", "inspect:service-mesh"],
+            "required_mitigations": ["rollback_deploy:service-mesh", "failover_zone:us-east-1a", "rebalance_traffic:api-gateway"],
+            "resolved": False,
+            "severity": "sev1",
+            "needs_manager_comms": True,
+        }
+    )
+    _append_incident_timeline(state, "tick=0 incident opened: service mesh certificate regression")
+    _append_incident_event(state, "incident_opened", "Service-mesh certificate regression and zone outage detected.", {"root_causes": ["service-mesh", "us-east-1a"]})
+    return state
+
+
+def _medium_replica_scenario() -> Dict[str, Any]:
+    state = _build_base_state()
+    state["service_details"]["postgres-replica"]["queue_depth"] = 5200
+    state["service_details"]["postgres-replica"]["cpu"] = 0.87
+    state["service_details"]["postgres-replica"]["memory"] = 0.84
+    state["service_details"]["postgres-replica"]["zone_states"]["us-east-1b"] = ServiceState.degraded
+    state["services"]["postgres-replica"] = ServiceState.degraded
+    state["services"]["profile-service"] = ServiceState.degraded
+    state["services"]["report-service"] = ServiceState.degraded
+    state["services"]["search-service"] = ServiceState.degraded
+    state["metrics"].update({"error_rate": 0.07, "p99_latency_ms": 780, "requests_per_sec": 1120, "queue_depth": 5200, "availability": 99.18, "saturation": 0.82, "cpu": 0.76})
+    state["alerts"] = [
+        Alert(severity="WARNING", message="postgres-replica replication lag above 18s", fired_at=0, source="postgres-replica"),
+        Alert(severity="WARNING", message="read-heavy services serving stale reads", fired_at=0, source="profile-service"),
+    ]
+    state["logs"].extend(
+        [
+            {"tick": 0, "service": "postgres-replica", "level": "WARN", "message": "wal replay lag exceeded 18s"},
+            {"tick": 0, "service": "profile-service", "level": "WARN", "message": "read-after-write consistency degraded by replica lag"},
+            {"tick": 0, "service": "report-service", "level": "WARN", "message": "replica cursor waiting on wal apply"},
+        ]
+    )
+    state["traces"].append({"trace_id": "trc-medium-replica-01", "service": "profile-service", "span": "GET /profile", "latency_ms": 940, "status": "replica_lag", "zone": "us-east-1b"})
+    state["estimated_affected_users"] = 3100
+    state["incident"].update(
+        {
+            "name": "database-replication-lag",
+            "summary": "Replica lag is causing stale reads and elevated latency across read-heavy services.",
+            "root_causes": ["postgres-replica"],
+            "service_targets": ["postgres-replica", "profile-service", "report-service"],
+            "zone_targets": ["us-east-1b"],
+            "deploy_targets": {},
+            "required_evidence": ["inspect:postgres-replica", "query_metrics", "query_logs", "query_traces", "run_health_check:postgres-replica"],
+            "required_mitigations": ["restart_service:postgres-replica", "restore_zone:us-east-1b"],
+            "resolved": False,
+            "severity": "sev2",
+            "pending_failures": [{"kind": "replica_lag_spread", "service": "postgres-replica", "trigger_tick": 2}],
+        }
+    )
+    _append_incident_timeline(state, "tick=0 incident opened: database replication lag")
+    _append_incident_event(state, "incident_opened", "Replica lag detected on postgres-replica.", {"root_causes": ["postgres-replica"]})
+    return state
+
+
+def _medium_cache_scenario() -> Dict[str, Any]:
+    state = _build_base_state()
+    state["service_details"]["redis-cache"]["cpu"] = 0.96
+    state["service_details"]["redis-cache"]["memory"] = 0.9
+    state["service_details"]["cart-service"]["cpu"] = 0.93
+    state["service_details"]["cart-service"]["memory"] = 0.88
+    state["service_details"]["cart-service"]["queue_depth"] = 14000
+    state["services"]["redis-cache"] = ServiceState.degraded
+    state["services"]["cart-service"] = ServiceState.degraded
+    state["services"]["frontend-web"] = ServiceState.degraded
+    state["services"]["recommendation-service"] = ServiceState.degraded
+    state["metrics"].update({"error_rate": 0.1, "p99_latency_ms": 1120, "requests_per_sec": 980, "queue_depth": 14000, "availability": 98.95, "saturation": 0.9, "cpu": 0.84})
+    state["alerts"] = [
+        Alert(severity="CRITICAL", message="redis-cache eviction storm detected", fired_at=0, source="redis-cache"),
+        Alert(severity="WARNING", message="cart-service cache miss amplification on hot keys", fired_at=0, source="cart-service"),
+    ]
+    state["logs"].extend(
+        [
+            {"tick": 0, "service": "redis-cache", "level": "ERROR", "message": "eviction storm on hot product:* keys"},
+            {"tick": 0, "service": "cart-service", "level": "WARN", "message": "cache miss rate spiked to 88%"},
+            {"tick": 0, "service": "frontend-web", "level": "WARN", "message": "product page latency rising during cache stampede"},
+        ]
+    )
+    state["traces"].append({"trace_id": "trc-medium-cache-01", "service": "frontend-web", "span": "GET /product/123", "latency_ms": 1280, "status": "cache_stampede", "zone": "us-east-1a"})
+    state["estimated_affected_users"] = 5400
+    state["incident"].update(
+        {
+            "name": "cache-stampede",
+            "summary": "A hot-key cache stampede is overloading redis-cache and spilling into cart and storefront latency.",
+            "root_causes": ["redis-cache", "cart-service"],
+            "service_targets": ["redis-cache", "cart-service", "frontend-web"],
+            "zone_targets": [],
+            "deploy_targets": {},
+            "required_evidence": ["inspect:redis-cache", "inspect:cart-service", "query_metrics", "query_logs", "query_traces"],
+            "required_mitigations": ["restart_service:redis-cache", "scale:cart-service", "tune_autoscaling:cart-service"],
+            "resolved": False,
+            "severity": "sev2",
+            "pending_failures": [{"kind": "cache_stampede_surge", "service": "redis-cache", "trigger_tick": 2}],
+        }
+    )
+    _append_incident_timeline(state, "tick=0 incident opened: cache stampede")
+    _append_incident_event(state, "incident_opened", "Cache stampede detected on redis-cache and cart-service.", {"root_causes": ["redis-cache", "cart-service"]})
+    return state
+
+
+def _hard_rollback_scenario() -> Dict[str, Any]:
+    state = _build_base_state()
+    state["service_details"]["frontend-web"]["version"] = "v5.0.6-bad"
+    state["deploy_history"].append({"service": "frontend-web", "version": "v5.0.6-bad", "tick": -1, "status": "success"})
+    state["code_diffs"] = [
+        "--- frontend-web/runtime_config.ts",
+        "- edge_config_version = '2026-04-01'",
+        "+ edge_config_version = '2026-04-08-bad'",
+        "+ stale_asset_manifest = true",
+    ]
+    state["services"]["frontend-web"] = ServiceState.degraded
+    state["services"]["api-gateway"] = ServiceState.degraded
+    state["services"]["mobile-bff"] = ServiceState.degraded
+    state["metrics"].update({"error_rate": 0.14, "p99_latency_ms": 1680, "requests_per_sec": 760, "availability": 98.35, "saturation": 0.89, "cpu": 0.8})
+    state["alerts"] = [
+        Alert(severity="CRITICAL", message="frontend-web rollout causing stale asset manifest and elevated 502s", fired_at=0, source="frontend-web"),
+        Alert(severity="WARNING", message="mobile-bff receiving stale config from frontend edge bundle", fired_at=0, source="mobile-bff"),
+    ]
+    state["logs"].extend(
+        [
+            {"tick": 0, "service": "frontend-web", "level": "ERROR", "message": "asset manifest mismatch after rollout v5.0.6-bad"},
+            {"tick": 0, "service": "api-gateway", "level": "WARN", "message": "frontend retries increased after partial rollback attempt"},
+            {"tick": 0, "service": "mobile-bff", "level": "WARN", "message": "stale frontend config propagated to mobile edge path"},
+        ]
+    )
+    state["traces"].append({"trace_id": "trc-hard-rollback-01", "service": "frontend-web", "span": "GET /checkout", "latency_ms": 1940, "status": "stale_manifest", "zone": "us-east-1b"})
+    state["estimated_affected_users"] = 9700
+    state["incident"].update(
+        {
+            "name": "partial-deploy-rollback-failure",
+            "summary": "A frontend rollback only partially lands, leaving stale config until the service is restarted cleanly.",
+            "root_causes": ["frontend-web"],
+            "service_targets": ["frontend-web", "api-gateway"],
+            "zone_targets": [],
+            "deploy_targets": {"frontend-web": "v5.0.4"},
+            "required_evidence": ["inspect:frontend-web", "query_metrics", "query_logs", "query_traces", "query_deploy"],
+            "required_mitigations": ["rollback_deploy:frontend-web", "restart_service:frontend-web", "rebalance_traffic:api-gateway"],
+            "resolved": False,
+            "severity": "sev1",
+            "needs_manager_comms": True,
+            "pending_failures": [{"kind": "partial_rollback_residual", "service": "frontend-web", "trigger_tick": 2}],
+        }
+    )
+    _append_incident_timeline(state, "tick=0 incident opened: partial rollback failure")
+    _append_incident_event(state, "incident_opened", "Frontend rollback failure detected after bad deploy.", {"root_causes": ["frontend-web"]})
+    return state
+
+
+def _hard_dns_scenario() -> Dict[str, Any]:
+    state = _build_base_state()
+    for zone in state["service_details"]["dns-control-plane"]["zones"]:
+        state["service_details"]["dns-control-plane"]["zone_states"][zone] = ServiceState.down
+    state["zones"]["us-east-1a"]["status"] = "degraded"
+    state["zones"]["us-east-1a"]["packet_loss"] = 0.09
+    state["zones"]["us-east-1a"]["latency_ms"] = 88
+    state["services"]["dns-control-plane"] = ServiceState.down
+    state["services"]["edge-proxy"] = ServiceState.degraded
+    state["services"]["api-gateway"] = ServiceState.degraded
+    state["services"]["frontend-web"] = ServiceState.degraded
+    state["services"]["auth-service"] = ServiceState.degraded
+    state["metrics"].update({"error_rate": 0.17, "p99_latency_ms": 1820, "requests_per_sec": 690, "availability": 98.1, "saturation": 0.91, "cpu": 0.82})
+    state["alerts"] = [
+        Alert(severity="CRITICAL", message="dns-control-plane resolution failures across edge services", fired_at=0, source="dns-control-plane"),
+        Alert(severity="CRITICAL", message="Zone us-east-1a recursion timeouts amplifying DNS failures", fired_at=0, source="us-east-1a"),
+    ]
+    state["logs"].extend(
+        [
+            {"tick": 0, "service": "dns-control-plane", "level": "ERROR", "message": "NXDOMAIN spike and recursive resolver timeout"},
+            {"tick": 0, "service": "edge-proxy", "level": "ERROR", "message": "upstream name resolution failures for api-gateway"},
+            {"tick": 0, "service": "auth-service", "level": "WARN", "message": "token introspection delayed by DNS lookup timeouts"},
+        ]
+    )
+    state["traces"].append({"trace_id": "trc-hard-dns-01", "service": "edge-proxy", "span": "resolve api-gateway", "latency_ms": 2080, "status": "dns_timeout", "zone": "us-east-1a"})
+    state["estimated_affected_users"] = 12400
+    state["incident"].update(
+        {
+            "name": "dns-control-plane-outage",
+            "summary": "DNS control plane failures and a degraded edge zone are breaking name resolution for critical edge paths.",
+            "root_causes": ["dns-control-plane", "us-east-1a"],
+            "service_targets": ["dns-control-plane", "edge-proxy", "api-gateway"],
+            "zone_targets": ["us-east-1a"],
+            "deploy_targets": {},
+            "required_evidence": ["inspect:dns-control-plane", "inspect:edge-proxy", "query_metrics", "query_logs", "query_topology"],
+            "required_mitigations": ["restart_service:dns-control-plane", "failover_zone:us-east-1a", "rebalance_traffic:api-gateway"],
+            "resolved": False,
+            "severity": "sev1",
+            "needs_manager_comms": True,
+            "pending_failures": [{"kind": "dns_edge_spread", "service": "dns-control-plane", "trigger_tick": 2}],
+        }
+    )
+    _append_incident_timeline(state, "tick=0 incident opened: DNS control plane outage")
+    _append_incident_event(state, "incident_opened", "DNS control plane outage detected.", {"root_causes": ["dns-control-plane", "us-east-1a"]})
+    return state
+
+
+def _hard_region_scenario() -> Dict[str, Any]:
+    state = _build_base_state()
+    for zone in ["us-east-1a", "us-east-1b"]:
+        state["zones"][zone]["status"] = "down"
+        state["zones"][zone]["packet_loss"] = 0.34 if zone == "us-east-1a" else 0.28
+        state["zones"][zone]["latency_ms"] = 280 if zone == "us-east-1a" else 220
+    for service in ["api-gateway", "frontend-web", "mobile-bff", "order-service", "payment-service", "auth-service"]:
+        detail = state["service_details"][service]
+        for zone in ["us-east-1a", "us-east-1b"]:
+            if zone in detail["zone_states"]:
+                detail["zone_states"][zone] = ServiceState.down
+        state["services"][service] = ServiceState.degraded
+        detail["cpu"] = min(0.99, detail["cpu"] + 0.18)
+        detail["memory"] = min(0.99, detail["memory"] + 0.12)
+    state["metrics"].update({"error_rate": 0.24, "p99_latency_ms": 2360, "requests_per_sec": 520, "availability": 96.8, "saturation": 0.96, "cpu": 0.88})
+    state["alerts"] = [
+        Alert(severity="CRITICAL", message="dual-zone failure in us-east region causing traffic collapse", fired_at=0, source="us-east-1a"),
+        Alert(severity="CRITICAL", message="order and payment services failing over incomplete capacity", fired_at=0, source="order-service"),
+    ]
+    state["logs"].extend(
+        [
+            {"tick": 0, "service": "api-gateway", "level": "ERROR", "message": "east region failover exhausted healthy gateway capacity"},
+            {"tick": 0, "service": "order-service", "level": "ERROR", "message": "regional dependency outage dropped checkout workflows"},
+            {"tick": 0, "service": "payment-service", "level": "WARN", "message": "payment authorization retries surging after east region loss"},
+        ]
+    )
+    state["traces"].append({"trace_id": "trc-hard-region-01", "service": "api-gateway", "span": "POST /checkout", "latency_ms": 2640, "status": "regional_failover", "zone": "us-east-1c"})
+    state["estimated_affected_users"] = 20800
+    state["incident"].update(
+        {
+            "name": "cascading-region-failure",
+            "summary": "A dual-zone east-region failure is cascading through edge and checkout services, requiring coordinated failover and restoration.",
+            "root_causes": ["us-east-1a", "us-east-1b"],
+            "service_targets": ["api-gateway", "frontend-web", "order-service", "payment-service"],
+            "zone_targets": ["us-east-1a", "us-east-1b"],
+            "deploy_targets": {},
+            "required_evidence": ["inspect:api-gateway", "query_metrics", "query_logs", "query_traces", "query_topology"],
+            "required_mitigations": ["failover_zone:us-east-1a", "failover_zone:us-east-1b", "restore_zone:us-east-1a", "restore_zone:us-east-1b", "rebalance_traffic:api-gateway"],
+            "resolved": False,
+            "severity": "sev0",
+            "needs_manager_comms": True,
+            "pending_failures": [{"kind": "regional_failover_surge", "service": "api-gateway", "trigger_tick": 2}],
+        }
+    )
+    _append_incident_timeline(state, "tick=0 incident opened: cascading region failure")
+    _append_incident_event(state, "incident_opened", "Dual-zone region failure detected.", {"root_causes": ["us-east-1a", "us-east-1b"]})
+    return state
+
+
 def generate_procedural_incident(seed: int = 20260407) -> Dict[str, Any]:
     rng = random.Random(seed)
     state = _build_base_state()
@@ -478,6 +865,15 @@ def generate_variant(task_id: Scenario, seed: int) -> Dict[str, Any]:
         state["incident"]["variant"] = {"seed": seed, "focus_service": impacted}
         return state
 
+    if task_id == Scenario.EASY_REDIS:
+        state = _easy_redis_scenario()
+        impacted = rng.choice(["auth-service", "cart-service", "mobile-bff"])
+        state["services"][impacted] = ServiceState.degraded
+        state["logs"].append({"tick": 0, "service": impacted, "level": "ERROR", "message": f"variant session failure observed in {impacted}"})
+        state["incident"]["summary"] = f"Seeded variant: redis-session outage with strongest impact on {impacted}."
+        state["incident"]["variant"] = {"seed": seed, "focus_service": impacted}
+        return state
+
     if task_id == Scenario.MEDIUM:
         state = _medium_scenario()
         zone = rng.choice(["us-east-1a", "us-east-1b", "us-east-1c"])
@@ -498,6 +894,30 @@ def generate_variant(task_id: Scenario, seed: int) -> Dict[str, Any]:
             f"restore_zone:{zone}",
         ]
         state["incident"]["summary"] = f"Seeded variant: worker backlog with zone degradation in {zone}."
+        state["incident"]["variant"] = {"seed": seed, "focus_zone": zone, "queue_depth": queue_depth}
+        return state
+
+    if task_id == Scenario.MEDIUM_KAFKA:
+        state = _medium_kafka_scenario()
+        zone = rng.choice(["us-east-1b", "us-east-1c", "us-central-1a"])
+        queue_depth = rng.choice([16000, 22000, 28000])
+        state["zones"]["us-central-1a"]["status"] = "healthy"
+        state["zones"]["us-central-1a"]["packet_loss"] = 0.0
+        state["zones"]["us-central-1a"]["latency_ms"] = 12
+        state["zones"][zone]["status"] = "degraded"
+        state["zones"][zone]["packet_loss"] = 0.1
+        state["zones"][zone]["latency_ms"] = 88
+        state["service_details"]["kafka"]["zone_states"][zone] = ServiceState.down
+        state["service_details"]["worker-service"]["queue_depth"] = queue_depth
+        state["incident"]["zone_targets"] = [zone]
+        state["incident"]["required_mitigations"] = [
+            "restart_service:kafka",
+            "clear_queue:worker-service",
+            "scale:worker-service",
+            f"drain_zone:{zone}",
+            f"restore_zone:{zone}",
+        ]
+        state["incident"]["summary"] = f"Seeded variant: kafka broker partition with consumer lag centered in {zone}."
         state["incident"]["variant"] = {"seed": seed, "focus_zone": zone, "queue_depth": queue_depth}
         return state
 
@@ -528,6 +948,101 @@ def generate_variant(task_id: Scenario, seed: int) -> Dict[str, Any]:
         state["incident"]["variant"] = {"seed": seed, "focus_zone": zone, "deploy_target": deploy_target}
         return state
 
+    if task_id == Scenario.HARD_MESH:
+        state = _hard_mesh_scenario()
+        zone = rng.choice(["us-east-1a", "us-east-1b", "us-east-1c"])
+        for z in state["zones"]:
+            state["zones"][z]["status"] = "healthy"
+            state["zones"][z]["packet_loss"] = 0.0
+            state["zones"][z]["latency_ms"] = 12
+        state["zones"][zone]["status"] = "down"
+        state["zones"][zone]["packet_loss"] = 0.25
+        state["zones"][zone]["latency_ms"] = 230
+        state["service_details"]["service-mesh"]["zone_states"][zone] = ServiceState.down
+        state["incident"]["zone_targets"] = [zone]
+        state["incident"]["required_mitigations"] = [
+            "rollback_deploy:service-mesh",
+            f"failover_zone:{zone}",
+            "rebalance_traffic:api-gateway",
+        ]
+        state["incident"]["summary"] = f"Seeded variant: service-mesh cert regression with primary blast radius in {zone}."
+        state["incident"]["variant"] = {"seed": seed, "focus_zone": zone}
+        return state
+
+    if task_id == Scenario.MEDIUM_REPLICA:
+        state = _medium_replica_scenario()
+        zone = rng.choice(["us-east-1a", "us-east-1b", "us-east-1c"])
+        state["incident"]["zone_targets"] = [zone]
+        state["incident"]["required_mitigations"] = ["restart_service:postgres-replica", f"restore_zone:{zone}"]
+        state["zones"]["us-east-1b"]["status"] = "healthy"
+        state["zones"]["us-east-1b"]["packet_loss"] = 0.0
+        state["zones"]["us-east-1b"]["latency_ms"] = 12
+        state["zones"][zone]["status"] = "degraded"
+        state["zones"][zone]["packet_loss"] = 0.05
+        state["zones"][zone]["latency_ms"] = 54
+        state["incident"]["summary"] = f"Seeded variant: replica lag concentrated behind {zone} readers."
+        state["incident"]["variant"] = {"seed": seed, "focus_zone": zone}
+        return state
+
+    if task_id == Scenario.MEDIUM_CACHE:
+        state = _medium_cache_scenario()
+        hot_service = rng.choice(["cart-service", "frontend-web", "recommendation-service"])
+        state["services"][hot_service] = ServiceState.degraded
+        state["logs"].append({"tick": 0, "service": hot_service, "level": "WARN", "message": f"variant hot-key surge strongest in {hot_service}"})
+        state["incident"]["summary"] = f"Seeded variant: cache stampede hottest on {hot_service}."
+        state["incident"]["variant"] = {"seed": seed, "focus_service": hot_service}
+        return state
+
+    if task_id == Scenario.HARD_ROLLBACK:
+        state = _hard_rollback_scenario()
+        deploy_target = rng.choice(["frontend-web", "api-gateway"])
+        if deploy_target == "api-gateway":
+            state["service_details"]["frontend-web"]["version"] = "v5.0.4"
+            state["services"]["frontend-web"] = ServiceState.healthy
+            state["service_details"]["api-gateway"]["version"] = "v3.2.2-bad"
+            state["incident"]["deploy_targets"] = {"api-gateway": "v3.2.0"}
+            state["incident"]["service_targets"] = ["api-gateway", "frontend-web"]
+            state["incident"]["required_evidence"] = ["inspect:api-gateway", "query_metrics", "query_logs", "query_traces", "query_deploy"]
+            state["incident"]["required_mitigations"] = ["rollback_deploy:api-gateway", "restart_service:api-gateway", "rebalance_traffic:api-gateway"]
+        state["incident"]["summary"] = f"Seeded variant: partial rollback failure centered on {deploy_target}."
+        state["incident"]["variant"] = {"seed": seed, "deploy_target": deploy_target}
+        return state
+
+    if task_id == Scenario.HARD_DNS:
+        state = _hard_dns_scenario()
+        zone = rng.choice(["us-east-1a", "us-east-1b", "us-east-1c"])
+        for z in state["zones"]:
+            state["zones"][z]["status"] = "healthy"
+            state["zones"][z]["packet_loss"] = 0.0
+            state["zones"][z]["latency_ms"] = 12
+        state["zones"][zone]["status"] = "degraded"
+        state["zones"][zone]["packet_loss"] = 0.08
+        state["zones"][zone]["latency_ms"] = 84
+        state["incident"]["zone_targets"] = [zone]
+        state["incident"]["required_mitigations"] = ["restart_service:dns-control-plane", f"failover_zone:{zone}", "rebalance_traffic:api-gateway"]
+        state["incident"]["summary"] = f"Seeded variant: DNS outage amplified in {zone}."
+        state["incident"]["variant"] = {"seed": seed, "focus_zone": zone}
+        return state
+
+    if task_id == Scenario.HARD_REGION:
+        state = _hard_region_scenario()
+        extra_zone = rng.choice(["us-east-1b", "us-east-1c"])
+        targets = sorted({"us-east-1a", extra_zone})
+        for zone in state["zones"]:
+            if zone in targets:
+                state["zones"][zone]["status"] = "down"
+                state["zones"][zone]["packet_loss"] = 0.31
+                state["zones"][zone]["latency_ms"] = 260
+            else:
+                state["zones"][zone]["status"] = "healthy"
+                state["zones"][zone]["packet_loss"] = 0.0
+                state["zones"][zone]["latency_ms"] = 12
+        state["incident"]["zone_targets"] = targets
+        state["incident"]["required_mitigations"] = [*(f"failover_zone:{zone}" for zone in targets), *(f"restore_zone:{zone}" for zone in targets), "rebalance_traffic:api-gateway"]
+        state["incident"]["summary"] = f"Seeded variant: cascading regional failure across {', '.join(targets)}."
+        state["incident"]["variant"] = {"seed": seed, "focus_zones": targets}
+        return state
+
     return copy.deepcopy(SCENARIOS[task_id])
 
 
@@ -535,5 +1050,13 @@ SCENARIOS: Dict[Scenario, Dict[str, Any]] = {
     Scenario.EASY: _easy_scenario(),
     Scenario.MEDIUM: _medium_scenario(),
     Scenario.HARD: _hard_scenario(),
+    Scenario.EASY_REDIS: _easy_redis_scenario(),
+    Scenario.MEDIUM_KAFKA: _medium_kafka_scenario(),
+    Scenario.HARD_MESH: _hard_mesh_scenario(),
+    Scenario.MEDIUM_REPLICA: _medium_replica_scenario(),
+    Scenario.MEDIUM_CACHE: _medium_cache_scenario(),
+    Scenario.HARD_ROLLBACK: _hard_rollback_scenario(),
+    Scenario.HARD_DNS: _hard_dns_scenario(),
+    Scenario.HARD_REGION: _hard_region_scenario(),
     Scenario.CHAOS: generate_procedural_incident(),
 }

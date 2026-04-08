@@ -1,22 +1,19 @@
 import copy
 from typing import Any, Dict, List, Tuple
 
+from openenv.core import Environment as BaseEnvironment
+
 from .actions import ACTION_CATALOG, CommandParser
 from .models import Action, Alert, Observation, Reward, Role, Scenario, ServiceState
 from .roles import RoleManager
 from .scenarios import SCENARIOS, SERVICE_DEPENDENCIES, generate_procedural_incident, generate_variant
-
-try:
-    from openenv import BaseEnvironment
-except ImportError:
-    class BaseEnvironment:
-        pass
 
 
 class DevOpsWarRoomEnv(BaseEnvironment):
     max_steps = 24
 
     def __init__(self, role: Role = Role.SRE):
+        super().__init__()
         self.role_manager = RoleManager(role)
         self.role = self.role_manager.current_role
         self.parser = CommandParser()
@@ -26,19 +23,30 @@ class DevOpsWarRoomEnv(BaseEnvironment):
         self.step_count = 0
         self.task_id = Scenario.EASY
         self.action_history: List[Dict[str, Any]] = []
+        self.episode_id = 0
+        self._done = False
         self.reset(self.task_id)
 
     @property
     def state(self) -> dict:
-        return self._state
+        return copy.deepcopy(self._state)
 
     def timeline(self) -> List[Dict[str, Any]]:
         return copy.deepcopy(self._state.get("incident", {}).get("events", []))
 
-    def reset(self, task_id: Scenario = Scenario.EASY, seed: int | None = None) -> Observation:
+    def reset(
+        self,
+        task_id: Scenario | str = Scenario.EASY,
+        seed: int | None = None,
+        episode_id: str | None = None,
+        **kwargs: Any,
+    ) -> Observation:
+        task_id = self._coerce_task_id(kwargs.get("task_id", task_id))
         self.step_count = 0
         self.tick_count = 0
         self.task_id = task_id
+        self.episode_id += 1
+        self._done = False
         self.role_manager = RoleManager(Role.SRE)
         self.role = self.role_manager.current_role
         if seed is not None:
@@ -49,6 +57,21 @@ class DevOpsWarRoomEnv(BaseEnvironment):
             self._state = copy.deepcopy(SCENARIOS[task_id])
         self.history = {"seen_evidence": set(), "executed_actions": set()}
         self.action_history = []
+        self._state.setdefault("episode", {})
+        self._state["episode"] = {
+            "episode_id": self.episode_id,
+            "external_episode_id": episode_id,
+            "task_id": self.task_id.value,
+            "seed": seed,
+            "done": False,
+            "reward_history": [],
+            "total_reward": 0.0,
+            "last_reward": None,
+            "last_info": {},
+            "last_action": None,
+        }
+        self._state["incident"].setdefault("pending_recoveries", [])
+        self._state["incident"].setdefault("blast_radius", [])
         self._refresh_service_states()
         self._sync_sla_status()
         self._record_metrics_snapshot("reset")
@@ -57,13 +80,23 @@ class DevOpsWarRoomEnv(BaseEnvironment):
     def step(self, action) -> Tuple[Observation, Reward, bool, Dict[str, Any]]:
         if isinstance(action, dict):
             action = Action(**action)
+        if self._done:
+            reward = Reward(value=0.0, reason="Episode already complete. Reset before stepping again.", done=True)
+            return self._get_observation(), reward, True, {"error": "episode_complete"}
         self.step_count += 1
 
         action_name, target, params = self._normalize_action(action)
+        before_progress = self._progress_snapshot()
         if action_name == "unknown":
             self.tick("unknown")
-            reward = Reward(value=-0.12 - self._ignored_alert_penalty(), reason="Unrecognized command.", done=self._is_done())
-            return self._get_observation(), reward, self._is_done(), {"error": "unknown_action"}
+            done = self._finalize_episode_state()
+            reward = Reward(
+                value=self._normalize_reward_value(-0.12 - self._ignored_alert_penalty()),
+                reason="Unrecognized command.",
+                done=done,
+            )
+            self._record_reward_event(action_name, target, reward, {"error": "unknown_action"})
+            return self._get_observation(), reward, done, {"error": "unknown_action"}
 
         if action_name == "switch_role":
             self.tick("switch_role")
@@ -71,14 +104,28 @@ class DevOpsWarRoomEnv(BaseEnvironment):
             if success:
                 self.role = self.role_manager.current_role
                 self._record_action(action_name, target, True)
-                reward = Reward(value=max(-1.0, min(1.0, 0.03 - self._ignored_alert_penalty())), reason=f"Role switched to {self.role.value}.", done=self._is_done())
-                return self._get_observation(), reward, self._is_done(), {"role": self.role.value}
-            reward = Reward(value=-0.06, reason="Invalid role.", done=self._is_done())
-            return self._get_observation(), reward, self._is_done(), {"error": "invalid_role"}
+                done = self._finalize_episode_state()
+                reward = Reward(
+                    value=self._normalize_reward_value(0.03 - self._ignored_alert_penalty()),
+                    reason=f"Role switched to {self.role.value}.",
+                    done=done,
+                )
+                self._record_reward_event(action_name, target, reward, {"role": self.role.value})
+                return self._get_observation(), reward, done, {"role": self.role.value}
+            done = self._finalize_episode_state()
+            reward = Reward(value=self._normalize_reward_value(-0.06), reason="Invalid role.", done=done)
+            self._record_reward_event(action_name, target, reward, {"error": "invalid_role"})
+            return self._get_observation(), reward, done, {"error": "invalid_role"}
 
         if not self.role_manager.check_action_allowed(action_name):
-            reward = Reward(value=-0.18, reason="Unauthorized action for current role.", done=self._is_done())
-            return self._get_observation(), reward, self._is_done(), {"error": "unauthorized"}
+            done = self._finalize_episode_state()
+            reward = Reward(
+                value=self._normalize_reward_value(-0.18),
+                reason="Unauthorized action for current role.",
+                done=done,
+            )
+            self._record_reward_event(action_name, target, reward, {"error": "unauthorized"})
+            return self._get_observation(), reward, done, {"error": "unauthorized"}
 
         handler_map = {
             "inspect": lambda: self._inspect(target),
@@ -117,13 +164,66 @@ class DevOpsWarRoomEnv(BaseEnvironment):
             reward_value += self._reward_for_action(action_name, target)
         else:
             reward_value -= 0.08
+        reward_value += self._progress_reward(before_progress)
+        reward_value -= self._bad_action_penalty(action_name, target, success)
         reward_value -= self._ignored_alert_penalty(action_name)
 
         self._refresh_service_states()
         self._sync_sla_status()
         self._update_incident_resolution()
-        reward = Reward(value=max(-1.0, min(1.0, reward_value)), reason=reason, done=self._is_done())
-        return self._get_observation(), reward, self._is_done(), info
+        done = self._finalize_episode_state()
+        reward = Reward(value=self._normalize_reward_value(reward_value), reason=reason, done=done)
+        self._record_reward_event(action_name, target, reward, info)
+        return self._get_observation(), reward, done, info
+
+    def _normalize_reward_value(self, reward_value: float) -> float:
+        return round(max(0.0, min(1.0, reward_value)), 4)
+
+    def _coerce_task_id(self, task_id: Scenario | str) -> Scenario:
+        if isinstance(task_id, Scenario):
+            return task_id
+        normalized = str(task_id).strip()
+        alias_map = {
+            "task_1": Scenario.EASY,
+            "task_2": Scenario.MEDIUM,
+            "task_3": Scenario.HARD,
+            "task_4": Scenario.EASY_REDIS,
+            "task_5": Scenario.MEDIUM_KAFKA,
+            "task_6": Scenario.HARD_MESH,
+            "task_7": Scenario.MEDIUM_REPLICA,
+            "task_8": Scenario.MEDIUM_CACHE,
+            "task_9": Scenario.HARD_ROLLBACK,
+            "task_10": Scenario.HARD_DNS,
+            "task_11": Scenario.HARD_REGION,
+        }
+        if normalized in alias_map:
+            return alias_map[normalized]
+        return Scenario(normalized)
+
+    def _finalize_episode_state(self) -> bool:
+        self._done = self._is_done()
+        self._state.setdefault("episode", {})
+        self._state["episode"]["done"] = self._done
+        self._state["episode"]["steps_used"] = self.step_count
+        return self._done
+
+    def _record_reward_event(self, action_name: str, target: str | None, reward: Reward, info: Dict[str, Any]):
+        episode = self._state.setdefault("episode", {})
+        history = episode.setdefault("reward_history", [])
+        event = {
+            "tick": self.tick_count,
+            "step": self.step_count,
+            "action": action_name,
+            "target": target,
+            "reward": round(reward.value, 4),
+            "reason": reward.reason,
+        }
+        history.append(event)
+        episode["reward_history"] = history[-40:]
+        episode["total_reward"] = round(sum(item["reward"] for item in episode["reward_history"]), 4)
+        episode["last_reward"] = copy.deepcopy(event)
+        episode["last_info"] = copy.deepcopy(info)
+        episode["last_action"] = {"action": action_name, "target": target}
 
     def _normalize_action(self, action: Action):
         params = copy.deepcopy(action.params or {})
@@ -173,6 +273,28 @@ class DevOpsWarRoomEnv(BaseEnvironment):
     def _service_detail(self, target: str):
         return self._state["service_details"].get(target)
 
+    def _schedule_recovery(self, kind: str, target: str, delay: int, payload: Dict[str, Any] | None = None):
+        self._state["incident"].setdefault("pending_recoveries", []).append(
+            {
+                "kind": kind,
+                "target": target,
+                "trigger_tick": self.tick_count + max(1, delay),
+                "payload": copy.deepcopy(payload or {}),
+            }
+        )
+
+    def _dependency_health(self, target: str) -> Dict[str, int]:
+        deps = SERVICE_DEPENDENCIES.get(target, [])
+        down = 0
+        degraded = 0
+        for dep in deps:
+            state = self._state["services"].get(dep, ServiceState.healthy)
+            if state in {ServiceState.down, ServiceState.isolated}:
+                down += 1
+            elif state == ServiceState.degraded:
+                degraded += 1
+        return {"down": down, "degraded": degraded}
+
     def _inspect(self, target: str):
         detail = self._service_detail(target) if target else None
         if detail is None:
@@ -217,19 +339,35 @@ class DevOpsWarRoomEnv(BaseEnvironment):
         if detail is None:
             return False, -0.1, "Unknown service restart target.", {"error": "unknown_service"}
         was_healthy = self._state["services"][target] == ServiceState.healthy
+        dependency_pressure = self._dependency_health(target)
+        blocked_by_dependencies = dependency_pressure["down"] > 0 and target not in self._state["incident"]["root_causes"]
+        risky_restart = detail["cpu"] > 0.85 or detail["memory"] > 0.9
         detail["isolated"] = False
-        detail["queue_depth"] = max(0, detail["queue_depth"] // 3)
-        detail["cpu"] = max(0.25, detail["cpu"] - 0.2)
-        detail["memory"] = max(0.22, detail["memory"] - 0.12)
+        detail["queue_depth"] = max(0, int(detail["queue_depth"] * (0.45 if blocked_by_dependencies else 0.3)))
+        detail["cpu"] = max(0.25, detail["cpu"] - (0.1 if blocked_by_dependencies else 0.2))
+        detail["memory"] = max(0.22, detail["memory"] - (0.07 if blocked_by_dependencies else 0.12))
         for zone in detail["zone_states"]:
             if self._state["zones"][zone]["status"] != "down":
-                detail["zone_states"][zone] = ServiceState.healthy
+                detail["zone_states"][zone] = ServiceState.restarting
         self._mark_mitigation(f"restart_service:{target}")
         if was_healthy:
             self._state["incident"]["unnecessary_restarts"].append(target)
         if target == "postgres-primary":
-            self._state["service_details"]["postgres-replica"]["zone_states"] = copy.deepcopy(detail["zone_states"])
-        return True, (0.16 if not was_healthy else -0.12), f"Restarted {target}.", {"service": target, "was_healthy": was_healthy}
+            replica = self._state["service_details"]["postgres-replica"]
+            for zone in replica["zone_states"]:
+                if self._state["zones"][zone]["status"] != "down":
+                    replica["zone_states"][zone] = ServiceState.healthy
+            replica["cpu"] = max(0.22, replica["cpu"] - 0.06)
+            replica["memory"] = max(0.22, replica["memory"] - 0.04)
+        delay = 2 if blocked_by_dependencies or risky_restart else 1
+        self._schedule_recovery("restart_service", target, delay, {"blocked_by_dependencies": blocked_by_dependencies})
+        if risky_restart:
+            for dep in SERVICE_DEPENDENCIES.get(target, [])[:2]:
+                dep_detail = self._service_detail(dep)
+                if dep_detail:
+                    dep_detail["cpu"] = min(0.99, dep_detail["cpu"] + 0.03)
+                    dep_detail["memory"] = min(0.99, dep_detail["memory"] + 0.02)
+        return True, (0.08 if blocked_by_dependencies else 0.16 if not was_healthy else -0.12), f"Restarted {target}.", {"service": target, "was_healthy": was_healthy, "blocked_by_dependencies": blocked_by_dependencies}
 
     def _rollback_deploy(self, target: str, version: str):
         detail = self._service_detail(target) if target else None
@@ -240,14 +378,16 @@ class DevOpsWarRoomEnv(BaseEnvironment):
             return False, -0.08, "No rollback required for this service.", {"service": target}
         applied_version = version or expected
         detail["version"] = applied_version
-        detail["cpu"] = max(0.24, detail["cpu"] - 0.18)
-        detail["memory"] = max(0.24, detail["memory"] - 0.1)
+        partial_rollback = applied_version != expected
+        detail["cpu"] = max(0.24, detail["cpu"] - (0.07 if partial_rollback else 0.18))
+        detail["memory"] = max(0.24, detail["memory"] - (0.04 if partial_rollback else 0.1))
         for zone in detail["zone_states"]:
             if self._state["zones"][zone]["status"] not in {"down"}:
-                detail["zone_states"][zone] = ServiceState.healthy
+                detail["zone_states"][zone] = ServiceState.degraded if partial_rollback else ServiceState.healthy
         self._state["code_diffs"].append(f"Rollback applied on {target} to {applied_version}")
         self._mark_mitigation(f"rollback_deploy:{target}")
-        return True, (0.18 if applied_version == expected else 0.04), f"Rolled back {target} to {applied_version}.", {"service": target, "version": applied_version}
+        self._schedule_recovery("rollback_deploy", target, 2 if target in {"service-mesh", "api-gateway", "frontend-web"} else 1, {"partial": partial_rollback})
+        return True, (0.18 if applied_version == expected else 0.04), f"Rolled back {target} to {applied_version}.", {"service": target, "version": applied_version, "partial": partial_rollback}
 
     def _scale_service(self, target: str, count: int):
         detail = self._service_detail(target) if target else None
@@ -255,39 +395,42 @@ class DevOpsWarRoomEnv(BaseEnvironment):
             return False, -0.08, "Unknown scale target.", {"error": "unknown_service"}
         add = max(1, count or 2)
         detail["replicas"] += add
-        detail["cpu"] = max(0.2, detail["cpu"] - 0.08 * min(add, 4))
-        detail["memory"] = max(0.22, detail["memory"] - 0.05 * min(add, 4))
-        detail["queue_depth"] = max(0, detail["queue_depth"] - 2500 * add)
+        detail["cpu"] = max(0.2, detail["cpu"] - 0.05 * min(add, 4))
+        detail["memory"] = min(0.99, max(0.22, detail["memory"] + 0.01 * min(add, 3)))
+        detail["queue_depth"] = max(0, detail["queue_depth"] - 2200 * add)
+        self._schedule_recovery("scale_service", target, 2, {"replicas_added": add})
         self._mark_mitigation(f"scale:{target}")
-        return True, 0.1, f"Scaled {target}.", {"replicas": detail["replicas"]}
+        return True, 0.08, f"Scaled {target}.", {"replicas": detail["replicas"]}
 
     def _clear_queue(self, target: str):
         detail = self._service_detail(target) if target else None
         if detail is None:
             return False, -0.08, "Unknown queue target.", {"error": "unknown_service"}
-        detail["queue_depth"] = max(0, detail["queue_depth"] - 25000)
-        detail["memory"] = max(0.24, detail["memory"] - 0.08)
+        kafka_impaired = self._state["services"].get("kafka") in {ServiceState.down, ServiceState.degraded}
+        detail["queue_depth"] = max(0, int(detail["queue_depth"] * (0.65 if kafka_impaired else 0.25)))
+        detail["memory"] = max(0.24, detail["memory"] - (0.04 if kafka_impaired else 0.08))
         detail["cpu"] = max(0.24, detail["cpu"] - 0.05)
         if detail["queue_depth"] <= 4000:
             for zone in detail["zone_states"]:
                 if self._state["zones"][zone]["status"] != "down":
                     detail["zone_states"][zone] = ServiceState.healthy
         self._mark_mitigation(f"clear_queue:{target}")
-        return True, 0.13, f"Cleared queue for {target}.", {"queue_depth": detail["queue_depth"]}
+        return True, 0.09, f"Cleared queue for {target}.", {"queue_depth": detail["queue_depth"], "upstream_blocked": kafka_impaired}
 
     def _tune_autoscaling(self, target: str):
         detail = self._service_detail(target) if target else None
         if detail is None:
             return False, -0.06, "Unknown autoscaling target.", {"error": "unknown_service"}
         detail["autoscaling_tuned"] = True
-        detail["cpu"] = max(0.18, detail["cpu"] - 0.1)
-        detail["memory"] = max(0.22, detail["memory"] - 0.06)
+        detail["cpu"] = max(0.18, detail["cpu"] - 0.04)
+        detail["memory"] = min(0.99, max(0.22, detail["memory"] + 0.01))
         if detail["queue_depth"] <= 5000:
             for zone in detail["zone_states"]:
                 if self._state["zones"][zone]["status"] != "down":
                     detail["zone_states"][zone] = ServiceState.healthy
+        self._schedule_recovery("autoscaling_effect", target, 2, {})
         self._mark_mitigation(f"tune_autoscaling:{target}")
-        return True, 0.11, f"Tuned autoscaling for {target}.", {"autoscaling_tuned": True}
+        return True, 0.08, f"Tuned autoscaling for {target}.", {"autoscaling_tuned": True}
 
     def _failover_zone(self, target: str):
         zone = self._state["zones"].get(target)
@@ -303,6 +446,9 @@ class DevOpsWarRoomEnv(BaseEnvironment):
                 detail["zone_states"][target] = ServiceState.healthy
                 if detail["replicas"] < len(detail["zones"]) + 1 and service in self._state["incident"]["service_targets"]:
                     detail["replicas"] += 1
+                elif target in detail["zones"]:
+                    detail["cpu"] = min(0.99, detail["cpu"] + 0.02)
+                    detail["memory"] = min(0.99, detail["memory"] + 0.015)
         self._mark_mitigation(f"failover_zone:{target}")
         return True, 0.15, f"Failed over zone {target}.", {"zone": target}
 
@@ -324,10 +470,11 @@ class DevOpsWarRoomEnv(BaseEnvironment):
         zone = self._state["zones"].get(target)
         if zone is None:
             return False, -0.06, "Unknown zone.", {"error": "unknown_zone"}
+        unresolved_root = any(self._state["services"].get(service) != ServiceState.healthy for service in self._state["incident"]["service_targets"])
         zone["status"] = "healthy"
         zone["drained"] = False
-        zone["packet_loss"] = 0.0
-        zone["latency_ms"] = 12
+        zone["packet_loss"] = 0.02 if unresolved_root else 0.0
+        zone["latency_ms"] = 20 if unresolved_root else 12
         for detail in self._state["service_details"].values():
             if target in detail["zone_states"] and detail["zone_states"][target] != ServiceState.isolated:
                 detail["zone_states"][target] = ServiceState.healthy
@@ -345,6 +492,10 @@ class DevOpsWarRoomEnv(BaseEnvironment):
             return False, -0.06, "Unknown traffic rebalance target.", {"error": "unknown_service"}
         detail["traffic_weight"] = 0.65
         detail["cpu"] = max(0.2, detail["cpu"] - 0.08)
+        for service, downstream in self._state["service_details"].items():
+            if service != target and target in SERVICE_DEPENDENCIES.get(service, []):
+                downstream["cpu"] = min(0.99, downstream["cpu"] + 0.015)
+                downstream["memory"] = min(0.99, downstream["memory"] + 0.01)
         for zone in detail["zone_states"]:
             if self._state["zones"][zone]["status"] == "healthy":
                 detail["zone_states"][zone] = ServiceState.healthy
@@ -474,6 +625,117 @@ class DevOpsWarRoomEnv(BaseEnvironment):
             bonus += 0.03
         return bonus
 
+    def _progress_snapshot(self) -> Dict[str, float]:
+        incident = self._state["incident"]
+        metrics = self._state["metrics"]
+        service_targets = incident.get("service_targets", [])
+        zone_targets = incident.get("zone_targets", [])
+        artifact_status = incident.get("artifact_status", {})
+        return {
+            "error_rate": metrics.get("error_rate", 1.0),
+            "latency": metrics.get("p99_latency_ms", 9999),
+            "availability": metrics.get("availability", 0.0),
+            "queue_depth": metrics.get("queue_depth", 0),
+            "healthy_services": sum(1 for service in service_targets if self._state["services"].get(service) == ServiceState.healthy),
+            "healthy_zones": sum(1 for zone in zone_targets if self._state["zones"].get(zone, {}).get("status") == "healthy"),
+            "artifacts": sum(1 for value in artifact_status.values() if value),
+        }
+
+    def _suggested_actions(self) -> List[str]:
+        incident = self._state["incident"]
+        suggestions: List[str] = []
+
+        if not incident.get("acknowledged_alerts"):
+            suggestions.append("acknowledge alert")
+
+        if self.role == Role.SRE:
+            for service in incident.get("service_targets", [])[:2]:
+                suggestions.append(f"inspect {service}")
+            if "query_metrics" not in incident.get("evidence_collected", []):
+                suggestions.append("query metrics")
+            if incident.get("zone_targets"):
+                suggestions.append(f"query topology")
+        elif self.role == Role.DEV:
+            if incident.get("deploy_targets"):
+                suggestions.append("query deploy history")
+                deploy_service = next(iter(incident["deploy_targets"]))
+                suggestions.append(f"inspect {deploy_service}")
+            if not incident.get("artifact_status", {}).get("runbook_attached"):
+                suggestions.append("attach runbook")
+        elif self.role == Role.MANAGER:
+            if incident.get("needs_manager_comms"):
+                suggestions.extend(["notify stakeholders", "update status page", "verify sla"])
+
+        if not incident.get("artifact_status", {}).get("rca"):
+            suggestions.append("run rca")
+        elif not incident.get("artifact_status", {}).get("postmortem"):
+            suggestions.append("generate postmortem")
+
+        deduped: List[str] = []
+        for suggestion in suggestions:
+            if suggestion not in deduped:
+                deduped.append(suggestion)
+        return deduped[:8]
+
+    def _progress_reward(self, before: Dict[str, float]) -> float:
+        after = self._progress_snapshot()
+        reward = 0.0
+
+        if before["error_rate"] > after["error_rate"]:
+            reward += min(0.08, (before["error_rate"] - after["error_rate"]) * 0.8)
+        elif after["error_rate"] > before["error_rate"]:
+            reward -= min(0.05, (after["error_rate"] - before["error_rate"]) * 0.5)
+
+        if before["latency"] > after["latency"]:
+            reward += min(0.07, (before["latency"] - after["latency"]) / 4000.0)
+        elif after["latency"] > before["latency"]:
+            reward -= min(0.04, (after["latency"] - before["latency"]) / 6000.0)
+
+        if after["availability"] > before["availability"]:
+            reward += min(0.05, (after["availability"] - before["availability"]) / 25.0)
+        elif after["availability"] < before["availability"]:
+            reward -= min(0.04, (before["availability"] - after["availability"]) / 30.0)
+
+        if before["queue_depth"] > after["queue_depth"]:
+            reward += min(0.06, (before["queue_depth"] - after["queue_depth"]) / 80000.0)
+        elif after["queue_depth"] > before["queue_depth"]:
+            reward -= min(0.04, (after["queue_depth"] - before["queue_depth"]) / 100000.0)
+
+        reward += 0.05 * max(0, after["healthy_services"] - before["healthy_services"])
+        reward += 0.04 * max(0, after["healthy_zones"] - before["healthy_zones"])
+        reward += 0.03 * max(0, after["artifacts"] - before["artifacts"])
+        return reward
+
+    def _bad_action_penalty(self, action_name: str, target: str, success: bool) -> float:
+        incident = self._state["incident"]
+        action_key = f"{action_name}:{target}" if target else action_name
+        penalty = 0.0
+
+        repeated = sum(1 for action in self.action_history if action["action"] == action_name and action.get("target") == target)
+        if repeated > 1:
+            penalty += min(0.08, 0.025 * (repeated - 1))
+
+        if action_name == "restart_service" and target in incident.get("unnecessary_restarts", []):
+            penalty += 0.08
+
+        mitigation_actions = {
+            "restart_service",
+            "rollback_deploy",
+            "scale",
+            "clear_queue",
+            "tune_autoscaling",
+            "failover_zone",
+            "drain_zone",
+            "restore_zone",
+            "rebalance_traffic",
+            "throttle_service",
+            "isolate_service",
+        }
+        if success and action_name in mitigation_actions and action_key not in incident.get("required_mitigations", []):
+            penalty += 0.03
+
+        return penalty
+
     def _ignored_alert_penalty(self, action_name: str = "") -> float:
         critical_alerts = sum(1 for alert in self._state["alerts"] if alert.severity == "CRITICAL")
         if critical_alerts == 0:
@@ -493,6 +755,8 @@ class DevOpsWarRoomEnv(BaseEnvironment):
                 zone_status = self._state["zones"].get(zone, {}).get("status", "healthy")
                 if current == ServiceState.isolated or detail["isolated"]:
                     zone_states.append(ServiceState.isolated)
+                elif current == ServiceState.restarting:
+                    zone_states.append(ServiceState.degraded)
                 elif zone_status == "down":
                     zone_states.append(ServiceState.down)
                 elif zone_status == "degraded" and current == ServiceState.healthy:
@@ -543,6 +807,18 @@ class DevOpsWarRoomEnv(BaseEnvironment):
         if self._state["service_details"]["api-gateway"]["version"] == "v3.2.1":
             latency += 650
             error_rate = min(0.99, error_rate + 0.05)
+        if self._state["service_details"]["service-mesh"]["version"] == "v1.0.1-cert-bug":
+            latency += 480
+            error_rate = min(0.99, error_rate + 0.06)
+        if services.get("dns-control-plane") == ServiceState.down:
+            latency += 520
+            error_rate = min(0.99, error_rate + 0.05)
+        if self._state["service_details"]["frontend-web"]["version"] == "v5.0.6-bad":
+            latency += 260
+            error_rate = min(0.99, error_rate + 0.03)
+        if services.get("postgres-replica") == ServiceState.degraded:
+            latency += 140
+            error_rate = min(0.99, error_rate + 0.02)
         if self._state["service_details"]["api-gateway"]["traffic_weight"] < 1.0:
             latency = max(180, int(latency - 120))
         availability = max(92.0, 100.0 - down * 1.1 - degraded * 0.22 - isolated * 0.4 - bad_zones * 0.6)
@@ -605,7 +881,119 @@ class DevOpsWarRoomEnv(BaseEnvironment):
                             "payload": {"service": "worker-service"},
                         }
                     )
+                if event["kind"] == "kafka_consumer_stall" and "restart_service:kafka" not in incident["mitigations_applied"]:
+                    worker = self._state["service_details"]["worker-service"]
+                    worker["queue_depth"] += 6000
+                    worker["cpu"] = min(0.99, worker["cpu"] + 0.05)
+                    worker["memory"] = min(0.99, worker["memory"] + 0.04)
+                    for service in ["notification-service", "analytics-service", "recommendation-service"]:
+                        for zone in self._state["service_details"][service]["zone_states"]:
+                            if self._state["zones"][zone]["status"] != "down":
+                                self._state["service_details"][service]["zone_states"][zone] = ServiceState.degraded
+                    self._state["logs"].append({"tick": self.tick_count, "service": "kafka", "level": "ERROR", "message": "consumer stall event fired due to unresolved broker partition"})
+                    self._state["incident"].setdefault("events", []).append(
+                        {
+                            "tick": self.tick_count,
+                            "type": "failure",
+                            "summary": "kafka consumer stall propagated to async services",
+                            "payload": {"service": "kafka"},
+                        }
+                    )
+                if event["kind"] == "replica_lag_spread" and "restart_service:postgres-replica" not in incident["mitigations_applied"]:
+                    replica = self._state["service_details"]["postgres-replica"]
+                    replica["queue_depth"] += 2800
+                    replica["cpu"] = min(0.99, replica["cpu"] + 0.04)
+                    replica["memory"] = min(0.99, replica["memory"] + 0.03)
+                    for service in ["profile-service", "report-service", "search-service"]:
+                        for zone in self._state["service_details"][service]["zone_states"]:
+                            if self._state["zones"][zone]["status"] != "down":
+                                self._state["service_details"][service]["zone_states"][zone] = ServiceState.degraded
+                    self._state["logs"].append({"tick": self.tick_count, "service": "postgres-replica", "level": "ERROR", "message": "replication lag spread into read-heavy services"})
+                if event["kind"] == "cache_stampede_surge" and "tune_autoscaling:cart-service" not in incident["mitigations_applied"]:
+                    cache = self._state["service_details"]["redis-cache"]
+                    cart = self._state["service_details"]["cart-service"]
+                    cache["cpu"] = min(0.99, cache["cpu"] + 0.05)
+                    cache["memory"] = min(0.99, cache["memory"] + 0.04)
+                    cart["queue_depth"] += 4200
+                    cart["cpu"] = min(0.99, cart["cpu"] + 0.05)
+                    cart["memory"] = min(0.99, cart["memory"] + 0.04)
+                    for service in ["frontend-web", "recommendation-service"]:
+                        for zone in self._state["service_details"][service]["zone_states"]:
+                            if self._state["zones"][zone]["status"] != "down":
+                                self._state["service_details"][service]["zone_states"][zone] = ServiceState.degraded
+                    self._state["logs"].append({"tick": self.tick_count, "service": "redis-cache", "level": "ERROR", "message": "hot-key stampede surged after missed mitigation window"})
+                if event["kind"] == "partial_rollback_residual" and not any(
+                    mitigation in incident["mitigations_applied"]
+                    for mitigation in {"restart_service:frontend-web", "restart_service:api-gateway"}
+                ):
+                    for service in ["frontend-web", "api-gateway", "mobile-bff"]:
+                        for zone in self._state["service_details"][service]["zone_states"]:
+                            if self._state["zones"][zone]["status"] != "down":
+                                self._state["service_details"][service]["zone_states"][zone] = ServiceState.degraded
+                    self._state["logs"].append({"tick": self.tick_count, "service": "frontend-web", "level": "ERROR", "message": "partial rollback left stale config active until restart"})
+                if event["kind"] == "dns_edge_spread" and "restart_service:dns-control-plane" not in incident["mitigations_applied"]:
+                    for service in ["edge-proxy", "api-gateway", "frontend-web", "auth-service"]:
+                        detail = self._state["service_details"][service]
+                        detail["cpu"] = min(0.99, detail["cpu"] + 0.04)
+                        detail["memory"] = min(0.99, detail["memory"] + 0.03)
+                        for zone in detail["zone_states"]:
+                            if self._state["zones"][zone]["status"] != "down":
+                                detail["zone_states"][zone] = ServiceState.degraded
+                    self._state["logs"].append({"tick": self.tick_count, "service": "dns-control-plane", "level": "ERROR", "message": "edge DNS failure spread across critical request path"})
+                if event["kind"] == "regional_failover_surge" and not any(
+                    mitigation in incident["mitigations_applied"]
+                    for mitigation in {"failover_zone:us-east-1a", "failover_zone:us-east-1b"}
+                ):
+                    for service in ["api-gateway", "frontend-web", "order-service", "payment-service", "auth-service"]:
+                        detail = self._state["service_details"][service]
+                        detail["cpu"] = min(0.99, detail["cpu"] + 0.06)
+                        detail["memory"] = min(0.99, detail["memory"] + 0.05)
+                        for zone in list(detail["zone_states"])[:2]:
+                            if self._state["zones"][zone]["status"] != "healthy":
+                                detail["zone_states"][zone] = ServiceState.down
+                    self._state["logs"].append({"tick": self.tick_count, "service": "api-gateway", "level": "ERROR", "message": "regional failover surge exhausted remaining east region capacity"})
                 incident["pending_failures"].remove(event)
+
+        for event in list(incident.get("pending_recoveries", [])):
+            if self.tick_count < event["trigger_tick"]:
+                continue
+            target = event["target"]
+            detail = self._service_detail(target)
+            if detail is None:
+                incident["pending_recoveries"].remove(event)
+                continue
+            payload = event.get("payload", {})
+            if event["kind"] == "restart_service":
+                blocked = payload.get("blocked_by_dependencies", False)
+                for zone in detail["zone_states"]:
+                    if self._state["zones"][zone]["status"] == "down":
+                        continue
+                    detail["zone_states"][zone] = ServiceState.degraded if blocked else ServiceState.healthy
+                if target in {"postgres-primary", "postgres-replica"} and not blocked:
+                    detail["cpu"] = max(0.22, detail["cpu"] - 0.08)
+                    detail["memory"] = max(0.22, detail["memory"] - 0.06)
+                    detail["queue_depth"] = 0
+                    if target == "postgres-primary":
+                        replica = self._service_detail("postgres-replica")
+                        if replica is not None:
+                            for zone in replica["zone_states"]:
+                                if self._state["zones"][zone]["status"] != "down":
+                                    replica["zone_states"][zone] = ServiceState.healthy
+            elif event["kind"] == "rollback_deploy":
+                if not payload.get("partial", False):
+                    for zone in detail["zone_states"]:
+                        if self._state["zones"][zone]["status"] != "down":
+                            detail["zone_states"][zone] = ServiceState.healthy
+                    detail["cpu"] = max(0.22, detail["cpu"] - 0.05)
+            elif event["kind"] == "scale_service":
+                replicas_added = payload.get("replicas_added", 1)
+                detail["cpu"] = max(0.18, detail["cpu"] - 0.04 * min(replicas_added, 3))
+                detail["memory"] = max(0.22, detail["memory"] - 0.02 * min(replicas_added, 3))
+                detail["queue_depth"] = max(0, detail["queue_depth"] - 1800 * replicas_added)
+            elif event["kind"] == "autoscaling_effect":
+                detail["cpu"] = max(0.16, detail["cpu"] - 0.06)
+                detail["queue_depth"] = max(0, int(detail["queue_depth"] * 0.55))
+            incident["pending_recoveries"].remove(event)
 
         for zone_name, zone in self._state["zones"].items():
             if zone["status"] == "degraded":
@@ -620,6 +1008,11 @@ class DevOpsWarRoomEnv(BaseEnvironment):
         for service, detail in self._state["service_details"].items():
             if detail["autoscaling_tuned"]:
                 detail["cpu"] = max(0.18, detail["cpu"] - 0.01)
+                if detail["queue_depth"] > 0:
+                    detail["queue_depth"] = max(0, detail["queue_depth"] - 700)
+            for zone, current in list(detail["zone_states"].items()):
+                if current == ServiceState.restarting and self._state["zones"][zone]["status"] != "down":
+                    detail["zone_states"][zone] = ServiceState.degraded
             if service == "worker-service" and "clear_queue:worker-service" not in incident["mitigations_applied"] and incident["name"] in {"queue-backlog-and-zone-degradation", "chaos-multi-root-cause"}:
                 detail["queue_depth"] += 2200
                 detail["cpu"] = min(0.99, detail["cpu"] + 0.03)
@@ -630,9 +1023,39 @@ class DevOpsWarRoomEnv(BaseEnvironment):
                         detail["zone_states"][zone] = ServiceState.healthy
             if self._state["service_details"]["api-gateway"]["version"] == "v3.2.1" and service in {"api-gateway", "frontend-web", "mobile-bff"}:
                 detail["cpu"] = min(0.99, detail["cpu"] + 0.02)
+            if self._state["service_details"]["service-mesh"]["version"] == "v1.0.1-cert-bug" and service in {"service-mesh", "edge-proxy", "api-gateway", "frontend-web"}:
+                detail["cpu"] = min(0.99, detail["cpu"] + 0.025)
+                detail["memory"] = min(0.99, detail["memory"] + 0.015)
             if any(self._state["zones"][zone]["status"] == "down" for zone in detail["zones"]):
                 detail["cpu"] = min(0.99, detail["cpu"] + 0.01)
                 detail["memory"] = min(0.99, detail["memory"] + 0.01)
+
+        focus_services = set(incident.get("root_causes", [])) | set(incident.get("service_targets", [])) | set(incident.get("deploy_targets", {}).keys())
+        for service, dependencies in SERVICE_DEPENDENCIES.items():
+            detail = self._service_detail(service)
+            if detail is None or not dependencies:
+                continue
+            down_deps = sum(1 for dep in dependencies if self._state["services"].get(dep) in {ServiceState.down, ServiceState.isolated})
+            degraded_deps = sum(1 for dep in dependencies if self._state["services"].get(dep) == ServiceState.degraded)
+            if down_deps or degraded_deps:
+                detail["cpu"] = min(0.99, detail["cpu"] + 0.015 * down_deps + 0.008 * degraded_deps)
+                detail["memory"] = min(0.99, detail["memory"] + 0.01 * down_deps + 0.005 * degraded_deps)
+                if down_deps >= 1 and any(dep in focus_services for dep in dependencies):
+                    first_zone = next(iter(detail["zone_states"]))
+                    if self._state["zones"][first_zone]["status"] != "down":
+                        detail["zone_states"][first_zone] = ServiceState.degraded
+                if down_deps >= 2 and any(dep in focus_services for dep in dependencies):
+                    for zone_name in list(detail["zone_states"])[:2]:
+                        if self._state["zones"][zone_name]["status"] != "down":
+                            detail["zone_states"][zone_name] = ServiceState.degraded
+            elif detail["queue_depth"] <= 4000 and detail["cpu"] < 0.75 and detail["memory"] < 0.75:
+                for zone_name, zone_state in detail["zone_states"].items():
+                    if zone_state == ServiceState.degraded and self._state["zones"][zone_name]["status"] == "healthy":
+                        detail["zone_states"][zone_name] = ServiceState.healthy
+
+        incident["blast_radius"] = sorted(
+            service for service, status in self._state["services"].items() if status != ServiceState.healthy
+        )
 
         if any(alert.severity == "CRITICAL" for alert in self._state["alerts"]) and action_name not in {"acknowledge_alert", "inspect", "query_metrics", "query_logs", "query_traces", "query_topology", "run_health_check"} and not incident["acknowledged_alerts"]:
             incident["ignored_alert_ticks"] += 1
@@ -640,9 +1063,10 @@ class DevOpsWarRoomEnv(BaseEnvironment):
     def _sync_sla_status(self, force_record: bool = False):
         metrics = self._state["metrics"]
         sla = self._state["sla"]
+        previous_status = sla.get("current_status", "CURRENTLY_MET")
         breached = metrics["availability"] < sla["target_availability"] or metrics["error_rate"] > sla["target_error_rate"]
         sla["current_status"] = "BREACHED" if breached else "CURRENTLY_MET"
-        if breached and (force_record or not sla["breaches"] or sla["breaches"][-1]["tick"] != self.tick_count):
+        if breached and (force_record or previous_status != "BREACHED"):
             sla["breaches"].append({"tick": self.tick_count, "error_rate": metrics["error_rate"], "availability": metrics["availability"]})
             self._state["incident"].setdefault("events", []).append(
                 {
@@ -709,7 +1133,9 @@ class DevOpsWarRoomEnv(BaseEnvironment):
 
     def _is_done(self) -> bool:
         sla_breach_terminal = len(self._state["sla"]["breaches"]) >= 3 or (
-            self.step_count >= 3 and self._state["metrics"]["availability"] < 95.0
+            self.step_count >= 12
+            and self._state["metrics"]["availability"] < 92.5
+            and self._state["metrics"]["error_rate"] > 0.35
         )
         full_recovery = self._state["incident"]["recovery_tick"] is not None
         return self.step_count >= self.max_steps or full_recovery or sla_breach_terminal or self._state["metrics"]["error_rate"] >= 0.99
@@ -719,10 +1145,23 @@ class DevOpsWarRoomEnv(BaseEnvironment):
             "name": self._state["incident"]["name"],
             "severity": self._state["incident"]["severity"],
             "resolved": self._state["incident"]["resolved"],
+            "task_id": self.task_id.value,
+            "episode_id": self.episode_id,
+            "service_targets": copy.deepcopy(self._state["incident"]["service_targets"]),
+            "zone_targets": copy.deepcopy(self._state["incident"]["zone_targets"]),
             "evidence_collected": copy.deepcopy(self._state["incident"]["evidence_collected"]),
             "mitigations_applied": copy.deepcopy(self._state["incident"]["mitigations_applied"]),
             "production_actions_completed": copy.deepcopy(self._state["incident"]["production_actions_completed"]),
+            "artifact_status": copy.deepcopy(self._state["incident"]["artifact_status"]),
+            "required_evidence_remaining": [
+                item for item in self._state["incident"]["required_evidence"] if item not in self._state["incident"]["evidence_collected"]
+            ],
+            "required_mitigations_remaining": [
+                item for item in self._state["incident"]["required_mitigations"] if item not in self._state["incident"]["mitigations_applied"]
+            ],
             "ignored_alert_ticks": self._state["incident"]["ignored_alert_ticks"],
+            "sla_status": self._state["sla"]["current_status"],
+            "estimated_affected_users": self._state["estimated_affected_users"],
             "variant": copy.deepcopy(self._state["incident"].get("variant")),
         }
         obs_data = {
@@ -734,6 +1173,7 @@ class DevOpsWarRoomEnv(BaseEnvironment):
             "service_distribution": copy.deepcopy(self._state["service_distribution"]),
             "incident_summary": incident_summary,
             "available_actions": self.role_manager.available_actions(),
+            "suggested_actions": self._suggested_actions(),
             "steps_remaining": max(0, self.max_steps - self.step_count),
         }
         if self.role == Role.SRE:

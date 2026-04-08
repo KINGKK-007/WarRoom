@@ -1,12 +1,18 @@
 import time
 
+from fastapi.testclient import TestClient
+
 from environment.actions import ACTION_CATALOG
 from environment.env import DevOpsWarRoomEnv
 from environment.models import Role, Scenario, ServiceState
+from environment.server import app
 
 
 def _run(env: DevOpsWarRoomEnv, command: str):
     return env.step({"action_type": "raw_command", "params": {"command": command}})
+
+
+client = TestClient(app)
 
 
 EASY_PLAYBOOK = [
@@ -101,6 +107,63 @@ class TestProductionTopology:
         assert env_a.state["incident"]["variant"] == env_b.state["incident"]["variant"]
         assert env_a.state["incident"]["required_mitigations"] == env_b.state["incident"]["required_mitigations"]
 
+    def test_state_returns_isolated_snapshot(self):
+        env = DevOpsWarRoomEnv()
+        snapshot = env.state
+        snapshot["metrics"]["error_rate"] = 0.99
+        assert env.state["metrics"]["error_rate"] != 0.99
+
+    def test_reset_accepts_task_alias_string(self):
+        env = DevOpsWarRoomEnv()
+        obs = env.reset("task_1")
+        assert obs.incident_summary["task_id"] == Scenario.EASY.value
+
+    def test_api_reset_accepts_manifest_task_aliases(self):
+        response = client.post("/reset", json={"task_id": "task_4", "seed": 123})
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["observation"]["incident_summary"]["task_id"] == Scenario.EasyRedis.value
+        assert payload["session_id"].startswith("sess-")
+
+    def test_api_reset_accepts_new_advanced_task_aliases(self):
+        response = client.post("/reset", json={"task_id": "task_10", "seed": 123})
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["observation"]["incident_summary"]["task_id"] == Scenario.HardDNS.value
+        assert payload["session_id"].startswith("sess-")
+
+    def test_api_step_reward_is_bounded(self):
+        reset_payload = client.post("/reset", json={"task_id": "task_1"}).json()
+        response = client.post(
+            "/step",
+            json={
+                "session_id": reset_payload["session_id"],
+                "action_type": "raw_command",
+                "params": {"command": "unknown command"},
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert 0.0 <= payload["reward"]["value"] <= 1.0
+
+    def test_api_state_is_session_scoped_and_isolated(self):
+        first = client.post("/reset", json={"task_id": "task_1", "seed": 123}).json()
+        second = client.post("/reset", json={"task_id": "task_1", "seed": 123}).json()
+
+        client.post(
+            "/step",
+            json={
+                "session_id": first["session_id"],
+                "action_type": "raw_command",
+                "params": {"command": "query metrics"},
+            },
+        )
+
+        first_state = client.get("/state", params={"session_id": first["session_id"]}).json()["state"]
+        second_state = client.get("/state", params={"session_id": second["session_id"]}).json()["state"]
+        assert first_state["metrics_history"][-1]["label"] == "query_metrics"
+        assert second_state["metrics_history"][-1]["label"] == "reset"
+
 
 class TestRoleVisibility:
     def test_sre_sees_metrics_logs_traces(self):
@@ -126,6 +189,13 @@ class TestRoleVisibility:
         assert obs.sla_status is not None
         assert obs.estimated_affected_users is not None
         assert obs.metrics is None
+
+    def test_observation_exposes_incident_progress_and_suggestions(self):
+        env = DevOpsWarRoomEnv()
+        obs = env.reset(Scenario.EASY)
+        assert "artifact_status" in obs.incident_summary
+        assert isinstance(obs.suggested_actions, list)
+        assert len(obs.suggested_actions) > 0
 
 
 class TestIncidentMechanics:
@@ -164,8 +234,19 @@ class TestIncidentMechanics:
     def test_sla_breach_can_end_episode(self):
         env = DevOpsWarRoomEnv()
         env.reset(Scenario.CHAOS)
-        env.state["sla"]["breaches"] = [{"tick": 0}, {"tick": 1}, {"tick": 2}]
+        env._state["sla"]["breaches"] = [{"tick": 0}, {"tick": 1}, {"tick": 2}]
         assert env._is_done() is True
+
+    def test_step_after_episode_end_returns_terminal_noop(self):
+        env = DevOpsWarRoomEnv()
+        env.reset(Scenario.EASY)
+        env._done = True
+        before = env.state
+        obs, reward, done, info = _run(env, "query metrics")
+        assert done is True
+        assert reward.value == 0.0
+        assert info["error"] == "episode_complete"
+        assert obs.tick == before["metrics_history"][-1]["tick"]
 
     def test_rca_contains_causal_chain_and_blast_radius(self):
         env = DevOpsWarRoomEnv()

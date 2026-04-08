@@ -9,142 +9,152 @@ pinned: false
 
 # DevOps War Room
 
-Production incident-response simulator built on OpenEnv. An agent operates as an on-call team member across SRE, Dev, and Manager roles, diagnoses multi-service failures, mitigates outages, verifies SLA recovery, and produces production artifacts such as RCA and postmortems.
+DevOps War Room is an OpenEnv production incident-response simulator. Agents operate as on-call responders across `SRE`, `Dev`, and `Manager` roles, investigate live failures, apply mitigations, verify SLA recovery, communicate status, and produce RCA and postmortem artifacts.
 
 **Team:** BholeChature  
 **Repository:** https://github.com/KINGKK-007/WarRoom  
 **Hugging Face Space:** https://coolalien35-warroom-deploy.hf.space  
 **OpenEnv Spec File:** [openenv.yaml](./openenv.yaml)
 
-## Why This Submission Is Real-World
+## Quickstart
 
-This is not a toy environment. The agent is evaluated on an operational workflow that maps closely to real production response:
+### Local server
 
-- Service failures propagate through a dependency graph of 39 interdependent services.
-- Incidents span 4 availability zones with zone drain, failover, and restore behavior.
-- Observability is role-filtered and includes metrics, logs, traces, topology, deploy history, and SLA state.
-- Recovery is not enough by itself; the agent must also handle runbook attachment, RCA, postmortem generation, and stakeholder communications.
-- Deterministic graders validate repaired state and penalize unnecessary restarts or ignored alerts.
-- The runtime supports seeded incident variants, procedural chaos incidents, timeline replay, and a browser dashboard.
+```bash
+pip install -r requirements.txt
+uvicorn environment.server:app --host 0.0.0.0 --port 8000
+```
+
+### Deterministic baseline
+
+```bash
+export ENV_URL="http://localhost:8000"
+export BASELINE_SEED=7
+python inference.py
+```
+
+### Adaptive baseline
+
+```bash
+export ENV_URL="http://localhost:8000"
+export BASELINE_SEED=7
+python adaptive_inference.py --task task_3
+```
+
+### Tests
+
+```bash
+pytest -q
+```
+
+Current local result:
+
+- `48 passed`
+
+## Environment Summary
+
+This repository models a living production environment rather than a single static puzzle:
+
+- 40 named services across data, app, edge, infra, observability, and ops layers
+- 4 availability zones with `drain`, `failover`, and `restore` mechanics
+- dependency propagation and blast radius expansion
+- delayed recoveries, failed mitigations, and partial mitigation effects
+- role-filtered observations for SRE, Dev, and Manager views
+- seeded variants and a procedural `Chaos` scenario
+- deterministic graders and bounded dense rewards
+- a lightweight browser dashboard for inspection and debugging
 
 ## Architecture
 
-```mermaid
-flowchart TD
-    A[Agent / inference.py] --> B[FastAPI OpenEnv Server]
-    B --> C[DevOpsWarRoomEnv]
+Text architecture diagram:
 
-    C --> D[Scenario Engine]
-    C --> E[Role Manager]
-    C --> F[Command Parser]
-    C --> G[Incident Runtime]
-    C --> H[Dense Reward Engine]
+1. `inference.py` or `adaptive_inference.py` calls the FastAPI server in [environment/server.py](./environment/server.py).
+2. `/reset` creates a fresh session-scoped [DevOpsWarRoomEnv](./environment/env.py) instance and returns `session_id` plus the first observation.
+3. `/step` routes the action to that session environment, applies the mutation, advances `tick()`, computes reward, and returns `observation`, `reward`, `done`, and `info`.
+4. The environment uses:
+   - [environment/scenarios.py](./environment/scenarios.py) for scenario templates and seeded variants
+   - [environment/actions.py](./environment/actions.py) for command parsing
+   - [environment/roles.py](./environment/roles.py) for role permissions
+   - [environment/models.py](./environment/models.py) for typed Observation / Action / Reward models
+5. Deterministic graders in [graders/](./graders) score final state quality.
+6. The dashboard in `/dashboard` visualizes reward history, SLA, zones, dependencies, timeline, and action history for an active session.
 
-    D --> D1[Easy]
-    D --> D2[Medium]
-    D --> D3[Hard]
-    D --> D4[Chaos]
+## Scenario Progression
 
-    G --> I[39 Services]
-    G --> J[4 Availability Zones]
-    G --> K[Dependency Cascades]
-    G --> L[SLA Tracking]
-    G --> M[RCA / Postmortem]
+The project now has two layers of progression:
 
-    C --> N[Observation Builder]
-    N --> N1[SRE View]
-    N --> N2[Dev View]
-    N --> N3[Manager View]
+- Core benchmark progression: `task_1` through `task_6`
+- Advanced extension set: `task_7` through `task_11`
 
-    O[Deterministic Graders] --> P[task_1.py]
-    O --> Q[task_2.py]
-    O --> R[task_3.py]
-```
+The core progression is:
 
-## Environment Model
+| Task ID | Scenario | Difficulty | Description |
+|---|---|---|---|
+| `task_1` | `Easy` | easy | Primary database outage cascading into auth and billing failures |
+| `task_2` | `Medium` | medium | Worker backlog plus zone degradation |
+| `task_3` | `Hard` | hard | Bad api-gateway deploy combined with zone failure |
+| `task_4` | `EasyRedis` | easy | Session-store outage affecting login and cart restore |
+| `task_5` | `MediumKafka` | medium | Kafka broker partition plus consumer lag |
+| `task_6` | `HardMesh` | hard | Service-mesh certificate regression plus zone outage |
 
-### Core loop
+Advanced graded scenarios:
 
-```mermaid
-sequenceDiagram
-    participant Agent
-    participant API as /step
-    participant Env as DevOpsWarRoomEnv
-    participant Runtime as Incident Runtime
-    participant Grade as Dense Reward
+| Task ID | Scenario | Difficulty | Description |
+|---|---|---|---|
+| `task_7` | `MediumReplica` | medium | Database replication lag degrading read-heavy services |
+| `task_8` | `MediumCache` | medium | Cache stampede on hot keys and overloaded cart path |
+| `task_9` | `HardRollback` | hard | Partial deploy rollback failure leaving stale config live |
+| `task_10` | `HardDNS` | hard | DNS control-plane outage across the edge request path |
+| `task_11` | `HardRegion` | hard | Cascading region failure across multiple east-region zones |
 
-    Agent->>API: action
-    API->>Env: step(action)
-    Env->>Runtime: mutate service / zone / incident state
-    Runtime->>Runtime: tick() updates cpu, memory, latency, queue, alerts, SLA
-    Runtime->>Grade: compute reward and penalties
-    Env-->>API: observation, reward, done, info
-    API-->>Agent: JSON response
-```
-
-### Service topology
-
-- 39 services across data, app, edge, infra, observability, and ops tiers
-- 4 zones:
-  - `us-east-1a`
-  - `us-east-1b`
-  - `us-east-1c`
-  - `us-central-1a`
-- Representative critical services:
-  - `postgres-primary`
-  - `worker-service`
-  - `api-gateway`
-  - `frontend-web`
-  - `service-mesh`
-  - `notification-service`
-  - `scheduler-service`
-  - `prometheus`
-  - `grafana`
-  - `tempo`
-
-### Runtime mechanics
-
-- `tick()` updates `cpu`, `memory`, `p99_latency_ms`, `queue_depth`, `error_rate`, `availability`, and saturation.
-- Multi-zone cascades propagate through the dependency graph when a core service or zone fails.
-- SLA tracking records breach history and can end failed trajectories early.
-- Incident timelines capture actions, failures, metric transitions, and SLA breaches for replay.
-- RCA output includes blast radius, causal chain, contributing factors, ruled-out causes, and follow-up actions.
-
-## Tasks
-
-The official graded tasks are:
-
-| Task ID | Scenario | Difficulty | Primary Failure Pattern | Success Pattern |
-|---|---|---:|---|---|
-| `task_1` | Easy | Easy | `postgres-primary` outage cascading into auth/billing | restore DB, verify SLA, create RCA + postmortem |
-| `task_2` | Medium | Medium | `worker-service` backlog + zone degradation in `us-east-1b` | drain backlog, heal zone, recover async services |
-| `task_3` | Hard | Hard | bad `api-gateway v3.2.1` deploy + zone failure in `us-east-1c` | rollback to `v3.2.0`, fail over, rebalance, restore |
-
-Bonus task:
+Bonus procedural scenario:
 
 | Scenario | Difficulty | Description |
-|---|---:|---|
-| `Chaos` | Advanced | Procedural 5-root-cause incident generation with overlapping service, deploy, and network failures |
+|---|---|---|
+| `Chaos` | advanced | Procedural overlapping service, deploy, and network failures |
 
-Seeded variants are supported through `/reset` with an optional `seed`. Easy, Medium, Hard, and Chaos preserve their task family while varying impacted zones, blast radius, or deploy targets deterministically.
+## Scenario Catalog
 
-## Action Space
+Canonical named scenarios implemented in [environment/scenarios.py](./environment/scenarios.py):
 
-The environment supports 27 meaningful actions. Examples:
+- `Easy`: `postgres-primary` down, downstream auth and billing degradation
+- `Medium`: worker backlog, async service degradation, zone impairment
+- `Hard`: bad `api-gateway` deploy plus zone outage and retry amplification
+- `EasyRedis`: `redis-session` failure affecting login and session-backed flows
+- `MediumKafka`: kafka broker partition with worker lag and async blast radius
+- `HardMesh`: `service-mesh` cert regression breaking edge mTLS flows
+- `MediumReplica`: replica lag causing stale reads and read-path latency
+- `MediumCache`: cache stampede driving hot-key misses and queue pressure
+- `HardRollback`: rollback only partially lands until a clean restart occurs
+- `HardDNS`: DNS control-plane outage plus degraded edge zone
+- `HardRegion`: multi-zone regional failure with coordinated recovery demands
+- `Chaos`: seeded procedural multi-root-cause incident generation
 
-| Category | Actions |
-|---|---|
-| Diagnosis | `inspect`, `query metrics`, `query logs`, `query traces`, `query topology`, `run health check` |
-| Service mitigation | `restart service`, `rollback deploy`, `scale`, `clear queue`, `tune autoscaling`, `throttle service`, `isolate service` |
-| Zone mitigation | `drain zone`, `failover zone`, `restore zone`, `rebalance traffic` |
-| Incident management | `acknowledge alert`, `verify sla`, `run rca`, `generate postmortem`, `attach runbook`, `update status page`, `notify`, `escalate` |
-| Coordination | `switch role {SRE|Dev|Manager}` |
+Examples:
+
+```bash
+curl -s -X POST http://localhost:8000/reset \
+  -H "Content-Type: application/json" \
+  -d '{"task_id":"task_4","seed":7}'
+```
+
+```bash
+curl -s -X POST http://localhost:8000/reset \
+  -H "Content-Type: application/json" \
+  -d '{"task_id":"HardMesh"}'
+```
+
+```bash
+curl -s -X POST http://localhost:8000/reset \
+  -H "Content-Type: application/json" \
+  -d '{"task_id":"task_10","seed":11}'
+```
 
 ## Observation Space
 
-Observations are typed Pydantic objects and are role-filtered.
+Observations are typed Pydantic models from [environment/models.py](./environment/models.py).
 
-### Shared fields
+Shared observation fields:
 
 - `tick`
 - `current_role`
@@ -154,206 +164,251 @@ Observations are typed Pydantic objects and are role-filtered.
 - `service_distribution`
 - `incident_summary`
 - `available_actions`
+- `suggested_actions`
 - `steps_remaining`
 
-### SRE view
+Role-specific visibility:
 
-- `metrics`
-- `logs`
-- `traces`
-- `metrics_history`
+- `SRE`: metrics, logs, traces, metrics history
+- `Dev`: deployment history, code diffs, logs, traces
+- `Manager`: SLA status, affected-user estimate, incident-oriented logs
 
-### Dev view
+`incident_summary` includes current task id, episode id, service targets, zone targets, completed evidence, remaining mitigations, artifact status, SLA status, affected users, and seeded variant metadata.
 
-- `deployment_history`
-- `code_diffs`
-- `logs`
-- `traces`
+## Action Space
 
-### Manager view
+The action surface is operational rather than synthetic.
 
-- `sla_status`
-- `estimated_affected_users`
-- timeline-focused logs
+Diagnosis:
 
-## Reward Design
+- `inspect`
+- `query metrics`
+- `query logs`
+- `query traces`
+- `query topology`
+- `query deploy history`
+- `run health check`
 
-The reward model is dense, continuous, and explicitly shaped for production response quality.
+Mitigations:
 
-- Positive signal for evidence collection:
-  - inspecting the right service
-  - querying metrics, traces, logs, topology, deploy history
-- Positive signal for mitigations:
-  - correct restart
-  - rollback of the bad deploy
-  - queue draining and autoscaling
-  - zone failover / restore
-- Positive signal for production follow-through:
-  - SLA verification
-  - RCA generation
-  - postmortem generation
-  - runbook attachment
-- Negative signal for:
-  - unauthorized actions
-  - unknown commands
-  - ignored critical alerts
-  - unnecessary restarts
-  - incomplete or premature RCA/postmortem flows
-  - terminal SLA-breach trajectories
+- `restart service`
+- `rollback`
+- `scale`
+- `clear queue`
+- `tune autoscaling`
+- `failover zone`
+- `drain zone`
+- `restore zone`
+- `rebalance traffic`
+- `throttle service`
+- `isolate service`
 
-## Deterministic Grading
+Incident workflow:
 
-Each official task has a deterministic grader returning a score in `[0.0, 1.0]`.
+- `acknowledge alert`
+- `verify sla`
+- `run rca`
+- `generate postmortem`
+- `attach runbook`
+- `notify stakeholders`
+- `update status page`
+- `escalate leadership`
+- `switch role {SRE|Dev|Manager}`
 
-- [graders/task_1.py](./graders/task_1.py)
-- [graders/task_2.py](./graders/task_2.py)
-- [graders/task_3.py](./graders/task_3.py)
+## Session-Based API
 
-The graders do not rely on keyword stuffing. They verify:
+The server is session-scoped. Each `POST /reset` creates a unique environment instance and returns a `session_id`. All later `step`, `state`, and `timeline` calls must use that session id.
 
-- final repaired service state
-- final metrics such as `error_rate`, `p99_latency_ms`, and `queue_depth`
-- required evidence gathered
-- required mitigations applied
-- SLA verification
-- RCA / postmortem completion
-- penalties for unnecessary restarts and ignored alerts
-
-## Baseline Results
-
-These are the current baseline scores from [inference.py](./inference.py) against the environment and graders:
-
-| Task | Score | Steps | Outcome |
-|---|---:|---:|---|
-| `task_1` | `0.97` | 11 | passed with wide margin |
-| `task_2` | `1.00` | 16 | perfect normalized score |
-| `task_3` | `0.94` | 17 | strong hard-task recovery |
-
-### Adaptive baseline
-
-[adaptive_inference.py](./adaptive_inference.py) is an observation-driven baseline that infers the incident class from live state, branches across seeded variants, and reaches the same grader scores on the three official tasks:
-
-| Task | Adaptive Score | Adaptive Steps |
-|---|---:|---:|
-| `task_1` | `0.97` | 11 |
-| `task_2` | `1.00` | 16 |
-| `task_3` | `0.94` | 17 |
-
-### Random vs smart benchmark
-
-Measured with [benchmark.py](./benchmark.py):
-
-| Scenario | Smart Resolved | Smart Error Rate | Random Resolved | Random Error Rate |
-|---|---|---:|---|---:|
-| Easy | `true` | `0.008` | `false` | `0.015` |
-| Medium | `true` | `0.020` | `false` | `0.113` |
-| Hard | `true` | `0.008` | `false` | `0.441` |
-
-Observed benchmark runtime:
-
-- `runtime_s = 0.0324`
-
-This matters because it demonstrates the task signal is meaningful: a scripted recovery playbook solves the incidents, while a random agent does not.
-
-## Reproducibility
-
-### Environment variables
-
-| Variable | Purpose | Default |
-|---|---|---|
-| `API_BASE_URL` | OpenAI-compatible model endpoint | `https://api.groq.com/openai/v1` |
-| `MODEL_NAME` | model name for the baseline agent | `llama-3.1-8b-instant` |
-| `HF_TOKEN` | API key for the model backend | required |
-| `ENV_URL` | target OpenEnv deployment | `https://coolalien35-warroom-deploy.hf.space` |
-
-### Local run
-
-```bash
-pip install -r requirements.txt
-uvicorn environment.server:app --host 0.0.0.0 --port 8000
-```
-
-In another shell:
-
-```bash
-export HF_TOKEN="your_token"
-export ENV_URL="http://localhost:8000"
-python inference.py
-```
-
-### Run against Hugging Face Space
-
-```bash
-export HF_TOKEN="your_token"
-unset ENV_URL
-python inference.py
-```
-
-`inference.py` defaults to:
-
-```python
-ENV_URL = os.environ.get("ENV_URL", "https://coolalien35-warroom-deploy.hf.space")
-```
-
-## OpenEnv API
-
-The deployed server exposes:
+Endpoints:
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/reset` | reset to a specific scenario |
-| `POST` | `/step` | execute an action |
-| `GET` | `/state` | fetch raw environment state |
-| `GET` | `/timeline` | replay structured incident events |
+| `POST` | `/reset` | create a new session and return the initial observation |
+| `POST` | `/step` | execute one action against a session |
+| `GET` | `/state?session_id=...` | fetch raw state for a session |
+| `GET` | `/timeline?session_id=...` | fetch structured incident events for a session |
 | `GET` | `/health` | health check |
 | `GET` | `/metadata` | environment metadata |
-| `GET` | `/schema` | action / observation schema |
-| `GET` | `/dashboard` | browser dashboard for live topology and timeline |
+| `GET` | `/schema` | request and observation schemas |
+| `GET` | `/dashboard` | interactive browser dashboard |
 
-These endpoints already satisfy the structural OpenEnv REST contract natively:
-
-- `POST /reset`
-- `POST /step`
-- `GET /state`
-- `GET /timeline`
-- `GET /health`
-- `GET /metadata`
-
-### Quick endpoint checks
+### Reset example
 
 ```bash
-curl -s https://coolalien35-warroom-deploy.hf.space/health
-```
-
-```bash
-curl -s https://coolalien35-warroom-deploy.hf.space/metadata
-```
-
-```bash
-curl -s -X POST https://coolalien35-warroom-deploy.hf.space/reset \
+curl -s -X POST http://localhost:8000/reset \
   -H "Content-Type: application/json" \
-  -d '{"task_id":"Easy"}'
+  -d '{"task_id":"task_3","seed":7}'
 ```
 
+Example response shape:
+
+```json
+{
+  "session_id": "sess-...",
+  "observation": {
+    "tick": 0,
+    "current_role": "SRE"
+  }
+}
+```
+
+### Step example
+
 ```bash
-curl -s -X POST https://coolalien35-warroom-deploy.hf.space/reset \
+curl -s -X POST http://localhost:8000/step \
   -H "Content-Type: application/json" \
-  -d '{"task_id":"Hard","seed":7}'
+  -d '{"session_id":"sess-...","action_type":"raw_command","params":{"command":"query metrics"}}'
+```
+
+### State example
+
+```bash
+curl -s "http://localhost:8000/state?session_id=sess-..."
+```
+
+## Reward Design
+
+Per-step rewards are bounded to `[0.0, 1.0]`.
+
+The reward function in [environment/env.py](./environment/env.py) combines:
+
+- partial progress on `error_rate`, latency, availability, and queue depth
+- progress on recovering required services and zones
+- progress on artifact completion
+- bonuses for required evidence and required mitigations
+- bonuses for production follow-through such as `verify_sla`, `run_rca`, `attach_runbook`, and `generate_postmortem`
+- penalties for unknown actions, unauthorized actions, repeated actions, unnecessary restarts, ignored critical alerts, and irrelevant mitigations
+
+This means the reward is dense enough to shape behavior, but the final benchmark still depends on deterministic grader scores.
+
+## Graders
+
+Graders are deterministic and return scores in `[0.0, 1.0]`.
+
+The grading stack is:
+
+- shared grading logic in [graders/common.py](./graders/common.py)
+- per-task wrappers in [graders/task_1.py](./graders/task_1.py) through [graders/task_11.py](./graders)
+- procedural grading in [graders/chaos.py](./graders/chaos.py)
+
+The graders score:
+
+- target service recovery
+- target zone recovery
+- final metrics
+- required evidence collected
+- required mitigations applied
+- artifact completion
+- communication actions when required
+- SLA verification
+
+They also apply deterministic penalties for ignored alerts, repeated wasteful actions, wrong restarts, and wrong rollbacks.
+
+## Inference / Baselines
+
+[inference.py](./inference.py) and [adaptive_inference.py](./adaptive_inference.py) are both observation-driven. They do not use a scripted golden-path playbook.
+
+Shared policy behavior:
+
+- reads live observations and raw state
+- ranks candidate actions from evidence gaps, mitigation gaps, role constraints, degraded services, zone status, and missing artifacts
+- uses deterministic seeds for reproducible runs
+- logs strict `START`, `STEP`, and `END` records
+
+Usage:
+
+```bash
+export ENV_URL="http://localhost:8000"
+export BASELINE_SEED=7
+python inference.py --task task_5
 ```
 
 ```bash
-curl -s -X POST https://coolalien35-warroom-deploy.hf.space/step \
-  -H "Content-Type: application/json" \
-  -d '{"action_type":"raw_command","params":{"command":"query metrics"}}'
+export ENV_URL="http://localhost:8000"
+export BASELINE_SEED=7
+python adaptive_inference.py --task task_10
 ```
 
-```bash
-curl -s https://coolalien35-warroom-deploy.hf.space/timeline
-```
+## Environment Variables
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `ENV_URL` | environment base URL | `https://coolalien35-warroom-deploy.hf.space` |
+| `BASELINE_SEED` | deterministic environment seed used by the baselines | `7` |
+| `REQUEST_TIMEOUT_S` | request timeout for API calls | `30` |
+| `MAX_EPISODE_STEPS` | max baseline steps | `24` |
+| `MODEL_NAME` | label used in structured baseline logs | `deterministic-baseline` or `adaptive-baseline` |
+| `API_BASE_URL` | optional OpenAI-compatible endpoint reserved for fallback mode | `https://api.groq.com/openai/v1` |
+| `HF_TOKEN` | optional API key reserved for fallback mode | empty |
+| `ALLOW_LLM_FALLBACK` | enable optional model fallback if supported | `0` |
+
+Notes:
+
+- The default baseline path is deterministic and does not require `HF_TOKEN`.
+- `API_BASE_URL`, `MODEL_NAME`, and `HF_TOKEN` are retained for compatibility with optional future fallback usage.
+
+## Dashboard
+
+The dashboard is served from `/dashboard` and is intentionally lightweight. It currently includes:
+
+- scenario selector with seeded reset
+- reward graph
+- SLA indicator
+- progress bars for evidence, mitigations, artifacts, and step budget
+- zone heatmap
+- service dependency graph
+- timeline visualization
+- action history viewer
+- active alerts
+- manual action stepping
+- raw state inspector
+
+It is useful for debugging baseline behavior and reviewing incident trajectories during development.
+
+## Evaluation
+
+Evaluation happens in two layers:
+
+1. Dense per-step reward from the environment
+2. Deterministic final-state score from the appropriate grader
+
+Recommended evaluation workflow:
 
 ```bash
-open https://coolalien35-warroom-deploy.hf.space/dashboard
+pytest -q
+python inference.py --task task_1
+python adaptive_inference.py --task task_6
 ```
+
+Representative current baseline results from the maintained code path:
+
+- `task_1`: success, score around `0.94`
+- `task_2`: success, score around `0.84`
+- `task_4`: success, score around `0.94`
+- `task_5`: success, score around `0.92`
+- `task_6`: success, score around `0.94`
+- `task_3`: deterministic partial recovery around `0.79` on the referenced seed
+
+## Reproducibility
+
+Reproducibility is built into the runtime:
+
+- `/reset` accepts an optional `seed`
+- sessions are isolated per client
+- same task id plus same seed yields the same variant family
+- reward values are deterministic for a fixed action sequence
+- graders are deterministic pure scoring functions
+
+Recommended reproducibility flow:
+
+```bash
+export ENV_URL="http://localhost:8000"
+export BASELINE_SEED=123
+python inference.py --task task_2
+python inference.py --task task_2
+```
+
+Two runs with the same seed should follow the same deterministic environment variant.
 
 ## Docker
 
@@ -375,58 +430,34 @@ Smoke test:
 curl -s http://localhost:8000/health
 ```
 
-## Hugging Face Space Deployment
+## Hugging Face Deployment
 
-The project is configured for Docker-based Space deployment.
+The Space is configured for Docker deployment through the front matter in this README and the project [Dockerfile](./Dockerfile).
 
-### Publish to a Space remote
+Typical deployment flow:
 
 ```bash
 git remote add space https://huggingface.co/spaces/YOUR_USERNAME/warroom-deploy
 git push space main
 ```
 
-### Verify Space health
+Health check:
 
 ```bash
 curl -s https://YOUR_USERNAME-warroom-deploy.hf.space/health
 ```
 
-## Validation
+## OpenEnv Notes
 
-### Test suite
+The implementation is structured for OpenEnv-style use:
 
-```bash
-pytest -q
-```
+- typed `Observation`, `Action`, and `Reward` models
+- public `reset`, `step`, and `state` endpoints
+- deterministic graders
+- bounded per-step rewards
+- task metadata in [openenv.yaml](./openenv.yaml)
 
-Current local result:
-
-- `22 passed`
-
-### Benchmark
-
-```bash
-python benchmark.py
-```
-
-### OpenEnv validation command
-
-When the OpenEnv CLI is available in your environment, run:
-
-```bash
-openenv validate
-```
-
-Current status:
-
-- the implementation is validator-aligned by design
-- task IDs in [openenv.yaml](./openenv.yaml) match the reset flow used by the baseline agent
-- the FastAPI server exposes the expected REST contract
-- response serialization explicitly normalizes nested models and enums for JSON safety
-- reset supports deterministic seeded variants without changing the task contract
-
-This means the project is likely to pass `openenv validate`, but the final compliance claim should be confirmed by running the actual validator in an environment where the CLI binary is available on `PATH`.
+The actual `openenv validate` CLI was not run in this workspace, so validator success is not claimed here.
 
 ## Repository Layout
 
@@ -440,35 +471,28 @@ WarRoom/
 │   ├── scenarios.py
 │   └── server.py
 ├── graders/
+│   ├── common.py
 │   ├── task_1.py
 │   ├── task_2.py
-│   └── task_3.py
+│   ├── task_3.py
+│   ├── task_4.py
+│   ├── task_5.py
+│   ├── task_6.py
+│   ├── task_7.py
+│   ├── task_8.py
+│   ├── task_9.py
+│   ├── task_10.py
+│   ├── task_11.py
+│   └── chaos.py
 ├── tests/
 │   ├── conftest.py
 │   ├── test_graders.py
 │   └── test_system.py
-├── benchmark.py
+├── baseline_policy.py
 ├── inference.py
+├── adaptive_inference.py
+├── benchmark.py
 ├── openenv.yaml
 ├── Dockerfile
 └── README.md
 ```
-
-## Why It Should Score Well
-
-- Real-world utility:
-  - models modern production incident response, not a toy domain
-- Task + grader quality:
-  - 3 official deterministic tasks plus a bonus Chaos scenario
-  - dense reward plus exact final-state grading
-- Environment design:
-  - multi-role, multi-zone, dependency-aware runtime
-  - service topology, observability, SLA, RCA, and postmortem flows
-- Code quality and deployability:
-  - FastAPI server
-  - Dockerized Space deployment
-  - benchmark and test coverage
-- Creativity:
-  - overlapping root-cause incidents
-  - production artifact generation
-  - topology-aware failure recovery

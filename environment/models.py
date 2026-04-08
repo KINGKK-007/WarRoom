@@ -29,12 +29,28 @@ class Scenario(str, Enum):
     Easy = "Easy"
     Medium = "Medium"
     Hard = "Hard"
+    EasyRedis = "EasyRedis"
+    MediumKafka = "MediumKafka"
+    HardMesh = "HardMesh"
+    MediumReplica = "MediumReplica"
+    MediumCache = "MediumCache"
+    HardRollback = "HardRollback"
+    HardDNS = "HardDNS"
+    HardRegion = "HardRegion"
     Chaos = "Chaos"
 
 
 Scenario.EASY = Scenario.Easy
 Scenario.MEDIUM = Scenario.Medium
 Scenario.HARD = Scenario.Hard
+Scenario.EASY_REDIS = Scenario.EasyRedis
+Scenario.MEDIUM_KAFKA = Scenario.MediumKafka
+Scenario.HARD_MESH = Scenario.HardMesh
+Scenario.MEDIUM_REPLICA = Scenario.MediumReplica
+Scenario.MEDIUM_CACHE = Scenario.MediumCache
+Scenario.HARD_ROLLBACK = Scenario.HardRollback
+Scenario.HARD_DNS = Scenario.HardDNS
+Scenario.HARD_REGION = Scenario.HardRegion
 Scenario.CHAOS = Scenario.Chaos
 
 
@@ -62,6 +78,7 @@ class Observation(BaseModel):
     metrics_history: Optional[List[Dict[str, Any]]] = None
     incident_summary: Optional[Dict[str, Any]] = None
     available_actions: List[str] = Field(default_factory=list)
+    suggested_actions: List[str] = Field(default_factory=list)
     steps_remaining: Optional[int] = None
 
     def __getitem__(self, key: str):
@@ -78,6 +95,6 @@ class Action(BaseModel):
 
 
 class Reward(BaseModel):
-    value: float
+    value: float = Field(ge=0.0, le=1.0)
     reason: str
     done: bool

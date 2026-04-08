@@ -1,16 +1,51 @@
 name: devops-warroom
 version: 1.0.0
-description: "Living infrastructure incident simulator with multi-role agent support"
-tags: ["devops", "incident-response", "sre", "real-world"]
+description: "Session-based OpenEnv incident-response simulator with multi-role observations, deterministic grading, seeded variants, and a lightweight debugging dashboard."
+tags: ["devops", "incident-response", "sre", "real-world", "openenv"]
 team: BholeChature
 endpoint: https://coolalien35-warroom-deploy.hf.space
 tasks:
   - id: task_1
     name: "Single Service Outage"
     difficulty: easy
+    description: "Recover a primary database outage cascading into auth and billing failures."
   - id: task_2
-    name: "Cascading Failure"
+    name: "Queue Backlog And Zone Degradation"
     difficulty: medium
+    description: "Drain worker backlog, stabilize async services, and restore the degraded zone."
   - id: task_3
-    name: "Silent Data Corruption"
+    name: "Bad Gateway Deploy With Zone Failure"
     difficulty: hard
+    description: "Rollback a bad api-gateway deploy, fail over the impaired zone, and rebalance traffic."
+  - id: task_4
+    name: "Session Store Outage"
+    difficulty: easy
+    description: "Recover redis-session and restore login and cart session flows."
+  - id: task_5
+    name: "Kafka Broker Partition"
+    difficulty: medium
+    description: "Resolve kafka partition issues, reduce consumer lag, and recover async workloads."
+  - id: task_6
+    name: "Service Mesh Certificate Regression"
+    difficulty: hard
+    description: "Rollback a broken service-mesh rollout and recover edge traffic during a zone incident."
+  - id: task_7
+    name: "Database Replication Lag"
+    difficulty: medium
+    description: "Recover replica health and reduce stale-read impact across read-heavy services."
+  - id: task_8
+    name: "Cache Stampede"
+    difficulty: medium
+    description: "Mitigate a cache stampede by restoring cache health and stabilizing the hot request path."
+  - id: task_9
+    name: "Partial Deploy Rollback Failure"
+    difficulty: hard
+    description: "Correct a failed rollback sequence and remove stale configuration from the live path."
+  - id: task_10
+    name: "DNS Control Plane Outage"
+    difficulty: hard
+    description: "Recover DNS control-plane health and edge routing during widespread name-resolution failures."
+  - id: task_11
+    name: "Cascading Region Failure"
+    difficulty: hard
+    description: "Coordinate multi-zone failover and restoration during a cascading regional outage."
