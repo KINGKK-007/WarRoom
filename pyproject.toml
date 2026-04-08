@@ -22,4 +22,7 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["environment*", "graders*"]
+include = ["environment*", "graders*", "server*"]
+
+[project.scripts]
+server = "server.app:main"
