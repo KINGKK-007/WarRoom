@@ -16,11 +16,7 @@ from baseline_policy import (
     build_session,
     choose_action,
     grade_task,
-    log_end,
-    log_start,
-    log_step,
     structured_action,
-    success,
 )
 
 
@@ -66,7 +62,7 @@ def state_env() -> Dict[str, Any]:
 
 def run_task(task_id: str, seed: int | None = None) -> float:
     effective_seed = BASELINE_SEED if seed is None else seed
-    log_start(task_id, ENV_URL, MODEL_NAME)
+    print(f"[START] task={task_id}", flush=True)
     observation = reset_env(task_id, seed=effective_seed)
     action_history: List[Dict[str, Any]] = []
     command_history: List[str] = []
@@ -83,7 +79,7 @@ def run_task(task_id: str, seed: int | None = None) -> float:
             result = step_env(action)
         except Exception as exc:
             error = str(exc)
-            log_step(steps, action, 0.0, False, error)
+            print(f"[STEP] step={steps} reward=0.0", flush=True)
             break
 
         reward = float((result.get("reward") or {}).get("value", 0.0))
@@ -95,14 +91,14 @@ def run_task(task_id: str, seed: int | None = None) -> float:
 
         command_history.append(action)
         action_history.append(structured_action(action))
-        log_step(steps, action, reward, done, error)
+        print(f"[STEP] step={steps} reward={reward}", flush=True)
 
         if done:
             break
 
     final_state = state_env()
     score = grade_task(task_id, action_history, final_state)
-    log_end(success(final_state, score), steps, score, total_reward)
+    print(f"[END] task={task_id} score={score} steps={steps}", flush=True)
     return score
 
 
