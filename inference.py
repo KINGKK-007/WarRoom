@@ -6,9 +6,14 @@ import os
 import sys
 from typing import Any, Dict, List
 
+from openai import OpenAI
+
+API_BASE_URL = os.getenv("API_BASE_URL", "https://coolalien35-warroom-deploy.hf.space")
+MODEL_NAME = os.getenv("MODEL_NAME", "deterministic-baseline")
+HF_TOKEN = os.getenv("HF_TOKEN")
+
 from baseline_policy import (
     BASELINE_SEED,
-    ENV_URL,
     MAX_EPISODE_STEPS,
     REQUEST_TIMEOUT_S,
     TASK_MAPPING,
@@ -18,21 +23,18 @@ from baseline_policy import (
     grade_task,
     structured_action,
 )
-
-
-MODEL_NAME = os.environ.get("MODEL_NAME", "deterministic-baseline")
 CURRENT_SESSION_ID: str | None = None
 SESSION = build_session()
 
 
 def _post(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    response = SESSION.post(f"{ENV_URL}{path}", json=payload, timeout=REQUEST_TIMEOUT_S)
+    response = SESSION.post(f"{API_BASE_URL.rstrip('/')}{path}", json=payload, timeout=REQUEST_TIMEOUT_S)
     response.raise_for_status()
     return response.json()
 
 
 def _get(path: str) -> Dict[str, Any]:
-    response = SESSION.get(f"{ENV_URL}{path}", timeout=REQUEST_TIMEOUT_S)
+    response = SESSION.get(f"{API_BASE_URL.rstrip('/')}{path}", timeout=REQUEST_TIMEOUT_S)
     response.raise_for_status()
     return response.json()
 
