@@ -65,7 +65,14 @@ def state_env() -> Dict[str, Any]:
 def run_task(task_id: str, seed: int | None = None) -> float:
     effective_seed = BASELINE_SEED if seed is None else seed
     print(f"[START] task={task_id}", flush=True)
-    observation = reset_env(task_id, seed=effective_seed)
+
+    try:
+        observation = reset_env(task_id, seed=effective_seed)
+    except Exception as exc:
+        print(f"Error resetting env: {exc}", file=sys.stderr)
+        print(f"[END] task={task_id} score=0.0 steps=0", flush=True)
+        return 0.0
+
     action_history: List[Dict[str, Any]] = []
     command_history: List[str] = []
     total_reward = 0.0
@@ -73,8 +80,14 @@ def run_task(task_id: str, seed: int | None = None) -> float:
 
     while steps < MAX_EPISODE_STEPS:
         steps += 1
-        state = state_env()
-        action = choose_action(observation, state, command_history, adaptive=False)
+        try:
+            state = state_env()
+            action = choose_action(observation, state, command_history, adaptive=False)
+        except Exception as exc:
+            print(f"Error getting state or choosing action: {exc}", file=sys.stderr)
+            print(f"[STEP] step={steps} reward=0.0", flush=True)
+            break
+
         error: str | None = None
 
         try:
@@ -98,8 +111,13 @@ def run_task(task_id: str, seed: int | None = None) -> float:
         if done:
             break
 
-    final_state = state_env()
-    score = grade_task(task_id, action_history, final_state)
+    try:
+        final_state = state_env()
+        score = grade_task(task_id, action_history, final_state)
+    except Exception as exc:
+        print(f"Error getting final state or grading: {exc}", file=sys.stderr)
+        score = 0.0
+
     print(f"[END] task={task_id} score={score} steps={steps}", flush=True)
     return score
 
