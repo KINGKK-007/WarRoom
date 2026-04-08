@@ -677,11 +677,13 @@ async def mcp_endpoint(request: Request):
 
 
 @app.post("/reset", response_model=ResetResponse)
-def reset(request: ResetRequest):
+def reset(request: ResetRequest | None = None):
     """Reset the environment against a specific task scenario.
 
     Returns the initial observation as a JSON dict.
     """
+    if request is None:
+        request = ResetRequest()
     try:
         session_id, session_env = _create_env_session()
         obs = session_env.reset(request.task_id, seed=request.seed, episode_id=session_id)
