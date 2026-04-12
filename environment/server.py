@@ -144,409 +144,403 @@ def root():
 
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard():
-    return """
-<!doctype html>
-<html>
+    return """<!doctype html>
+<html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <title>DevOps War Room Dashboard</title>
-  <style>
-    :root { --bg:#09111a; --panel:#101b27; --panel-2:#142233; --panel-3:#0d1824; --text:#edf3f8; --muted:#8ea2b5; --good:#33c27f; --warn:#f3b64c; --bad:#ff6b6b; --accent:#62b0ff; --accent-2:#7ef0c4; --line:rgba(255,255,255,.08); }
-    * { box-sizing:border-box; }
-    body { margin:0; font-family: ui-sans-serif, system-ui, sans-serif; color:var(--text); background:
-      radial-gradient(circle at top left, rgba(98,176,255,.16), transparent 28%),
-      radial-gradient(circle at top right, rgba(126,240,196,.10), transparent 22%),
-      linear-gradient(180deg, #0a121c, #09111a 55%, #071019); }
-    .wrap { max-width: 1480px; margin: 0 auto; padding: 24px; }
-    .header { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:18px; }
-    .sub { color:var(--muted); margin-top:8px; }
-    .controls { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-    .grid { display:grid; grid-template-columns: 1.35fr 1fr 1fr; gap:16px; }
-    .panel { background: linear-gradient(180deg, rgba(16,27,39,.96), rgba(12,20,30,.94)); border:1px solid var(--line); border-radius: 18px; padding: 16px; box-shadow: 0 18px 50px rgba(0,0,0,.28); min-width:0; }
-    .span-2 { grid-column: span 2; }
-    .span-3 { grid-column: span 3; }
-    h1,h2,h3 { margin:0 0 12px; }
-    h1 { font-size: 32px; }
-    .pill { display:inline-flex; align-items:center; padding:6px 10px; border-radius:999px; border:1px solid var(--line); background:rgba(255,255,255,.03); color:var(--muted); font-size:12px; margin-right:8px; margin-bottom:8px; }
-    .stats { display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; }
-    .metric, .mini, .zone-card, .dep-card { padding: 12px; border-radius: 12px; background:var(--panel-2); border:1px solid var(--line); }
-    .metric strong, .mini strong { display:block; color:var(--muted); font-size:12px; margin-bottom:6px; }
-    .metric .value { font-size:24px; font-weight:700; }
-    .rows { display:flex; flex-direction:column; gap:8px; }
-    .row { display:flex; justify-content:space-between; gap:12px; align-items:center; padding:8px 0; border-bottom:1px solid var(--line); }
-    .row:last-child { border-bottom:none; }
-    .healthy{color:var(--good)} .degraded,.drained{color:var(--warn)} .down,.isolated{color:var(--bad)}
-    .bar { height:10px; width:100%; background:#0b1520; border-radius:999px; overflow:hidden; border:1px solid var(--line); }
-    .bar > span { display:block; height:100%; background:linear-gradient(90deg, var(--accent), #8dd0ff); }
-    .bar.warn > span { background:linear-gradient(90deg, var(--warn), #ffd781); }
-    .bar.bad > span { background:linear-gradient(90deg, var(--bad), #ff9b9b); }
-    .progress-grid { display:grid; grid-template-columns: repeat(2, 1fr); gap:12px; }
-    .progress-title { display:flex; justify-content:space-between; font-size:13px; margin-bottom:6px; color:var(--muted); }
-    select, input, button, textarea { border-radius: 12px; border:1px solid var(--line); background:#0c1723; color:var(--text); padding:10px 12px; }
-    button { cursor:pointer; background:linear-gradient(180deg, #17304b, #102235); }
-    button:hover { filter:brightness(1.05); }
-    textarea { width:100%; min-height:84px; resize:vertical; }
-    .chart { width:100%; height:154px; background:linear-gradient(180deg, rgba(255,255,255,.02), rgba(255,255,255,.01)); border:1px solid var(--line); border-radius:14px; padding:8px; }
-    .timeline, .actions, .alerts { max-height: 340px; overflow:auto; padding-right:6px; }
-    .timeline-track { position:relative; padding-left:18px; }
-    .timeline-track::before { content:""; position:absolute; left:6px; top:4px; bottom:4px; width:2px; background:linear-gradient(180deg, rgba(98,176,255,.6), rgba(255,255,255,.08)); }
-    .event { position:relative; padding:0 0 14px 16px; }
-    .event::before { content:""; position:absolute; left:-1px; top:5px; width:10px; height:10px; border-radius:999px; background:var(--accent); box-shadow:0 0 0 4px rgba(98,176,255,.12); }
-    .log { font-family: ui-monospace, SFMono-Regular, monospace; font-size:12px; white-space:pre-wrap; color:#c4d2de; }
-    .badge { font-size:11px; padding:3px 8px; border-radius:999px; border:1px solid var(--line); color:var(--muted); }
-    .action { padding:10px 0; border-bottom:1px solid var(--line); }
-    .action:last-child { border-bottom:none; }
-    .action-top { display:flex; justify-content:space-between; gap:8px; margin-bottom:4px; }
-    .success { color:var(--good); }
-    .failure { color:var(--bad); }
-    .zones-grid { display:grid; grid-template-columns: repeat(2, 1fr); gap:10px; }
-    .zone-card { background:linear-gradient(180deg, rgba(20,34,51,.95), rgba(13,24,36,.95)); }
-    .zone-top { display:flex; justify-content:space-between; gap:8px; margin-bottom:10px; }
-    .heat { height:10px; border-radius:999px; background:rgba(255,255,255,.05); overflow:hidden; border:1px solid var(--line); }
-    .heat span { display:block; height:100%; background:linear-gradient(90deg, var(--good), var(--warn), var(--bad)); }
-    .dep-grid { display:grid; grid-template-columns: repeat(3, 1fr); gap:10px; }
-    .dep-card { background:linear-gradient(180deg, rgba(20,34,51,.9), rgba(13,24,36,.92)); }
-    .dep-name { display:flex; justify-content:space-between; gap:8px; margin-bottom:8px; }
-    .dep-links { display:flex; flex-wrap:wrap; gap:6px; }
-    .dep-pill { padding:4px 8px; border-radius:999px; border:1px solid var(--line); background:rgba(255,255,255,.03); font-size:11px; color:var(--muted); }
-    .sla-ring { display:grid; grid-template-columns: 110px 1fr; gap:14px; align-items:center; }
-    .ring { width:110px; height:110px; border-radius:999px; background:conic-gradient(var(--accent) 0deg, var(--accent) 0deg, rgba(255,255,255,.08) 0deg 360deg); display:grid; place-items:center; border:1px solid var(--line); }
-    .ring-inner { width:78px; height:78px; border-radius:999px; background:var(--panel-3); display:grid; place-items:center; font-size:20px; font-weight:700; }
-    pre { margin:0; }
-    details { border-top:1px solid var(--line); padding-top:12px; }
-    summary { cursor:pointer; color:var(--muted); }
-    @media (max-width: 1150px) {
-      .grid, .stats, .progress-grid, .zones-grid, .dep-grid, .sla-ring { grid-template-columns: 1fr; }
-      .span-2,.span-3 { grid-column: span 1; }
-      .header { flex-direction:column; }
-    }
-  </style>
+<meta charset="utf-8"/>
+<title>DevOps War Room — 3D Service Graph</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0a0a0c;font-family:ui-sans-serif,system-ui,sans-serif;color:#edf3f8;overflow:hidden}
+  #graph{width:100vw;height:100vh}
+  /* ── Glass panel shared ── */
+  .glass{
+    position:absolute;background:rgba(10,10,12,.55);
+    border:1px solid rgba(255,255,255,.1);border-radius:16px;
+    padding:16px;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+    box-shadow:0 8px 32px rgba(0,0,0,.6),inset 0 1px 0 rgba(255,255,255,.06);
+    z-index:10;
+  }
+  /* ── Left panel ── */
+  #info{top:20px;left:20px;width:240px}
+  #info h2{font-size:15px;font-weight:700;margin-bottom:10px;letter-spacing:.04em}
+  #status{font-size:11px;color:#8ea2b5;margin-bottom:12px;line-height:1.5}
+  .legend-row{display:flex;align-items:center;gap:8px;font-size:12px;color:#8ea2b5;margin:5px 0}
+  .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+  #node-detail{margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,.08);display:none}
+  #node-detail h3{font-size:13px;font-weight:700;margin-bottom:6px}
+  .nd-row{font-size:11px;color:#8ea2b5;margin:3px 0}
+  /* ── Right controls ── */
+  #controls{top:20px;right:20px;width:210px;display:flex;flex-direction:column;gap:8px}
+  select,input{width:100%;padding:8px 10px;border-radius:10px;border:1px solid rgba(255,255,255,.1);
+    background:rgba(255,255,255,.05);color:#edf3f8;font-size:12px;outline:none}
+  button{width:100%;padding:8px 10px;border-radius:10px;border:1px solid rgba(255,255,255,.1);
+    background:rgba(255,255,255,.07);color:#edf3f8;font-size:12px;cursor:pointer;transition:background .15s}
+  button:hover{background:rgba(255,255,255,.13)}
+  /* ── Bottom metrics bar ── */
+  #metrics{bottom:20px;left:50%;transform:translateX(-50%);
+    display:flex;gap:20px;padding:12px 24px;white-space:nowrap}
+  .metric{text-align:center}
+  .metric .val{font-size:18px;font-weight:700}
+  .metric .lbl{font-size:10px;color:#8ea2b5;margin-top:2px}
+</style>
 </head>
 <body>
-  <div class="wrap">
-    <div class="header">
-      <div>
-        <h1>DevOps War Room</h1>
-        <div id="summary" class="sub">Loading state…</div>
-      </div>
-      <div class="controls">
-        <select id="scenario">
-          <option value="task_1">Task 1</option>
-          <option value="task_2">Task 2</option>
-          <option value="task_3">Task 3</option>
-          <option value="task_4">Task 4</option>
-          <option value="task_5">Task 5</option>
-          <option value="task_6">Task 6</option>
-          <option value="task_7">Task 7</option>
-          <option value="task_8">Task 8</option>
-          <option value="task_9">Task 9</option>
-          <option value="task_10">Task 10</option>
-          <option value="task_11">Task 11</option>
-          <option value="Easy">Easy</option>
-          <option value="Medium">Medium</option>
-          <option value="Hard">Hard</option>
-          <option value="EasyRedis">EasyRedis</option>
-          <option value="MediumKafka">MediumKafka</option>
-          <option value="HardMesh">HardMesh</option>
-          <option value="MediumReplica">MediumReplica</option>
-          <option value="MediumCache">MediumCache</option>
-          <option value="HardRollback">HardRollback</option>
-          <option value="HardDNS">HardDNS</option>
-          <option value="HardRegion">HardRegion</option>
-          <option value="Chaos">Chaos</option>
-        </select>
-        <input id="seed" type="number" placeholder="Seed (optional)" />
-        <button id="resetBtn">Reset Scenario</button>
-        <button id="refreshBtn">Refresh</button>
-      </div>
-    </div>
-    <div class="grid">
-      <div class="panel span-2">
-        <h2>Episode Overview</h2>
-        <div id="badges"></div>
-        <div class="stats" id="metrics"></div>
-      </div>
-      <div class="panel">
-        <h2>SLA Indicator</h2>
-        <div class="sla-ring">
-          <div id="slaRing" class="ring"><div id="slaValue" class="ring-inner">0%</div></div>
-          <div class="rows">
-            <div class="row"><span>Status</span><strong id="slaStatus">n/a</strong></div>
-            <div class="row"><span>Target Availability</span><strong id="slaTargetAvailability">n/a</strong></div>
-            <div class="row"><span>Target Error Rate</span><strong id="slaTargetError">n/a</strong></div>
-            <div class="row"><span>Breaches</span><strong id="slaBreaches">0</strong></div>
-          </div>
-        </div>
-      </div>
-      <div class="panel span-2">
-        <h2>Reward Graph</h2>
-        <div class="mini"><strong>Total Reward</strong><div class="value" id="totalReward">0.0</div></div>
-        <div class="mini" style="margin-top:10px;"><strong>Last Reward</strong><div class="value" id="lastReward">n/a</div><div class="sub" id="lastReason"></div></div>
-        <svg id="rewardChart" class="chart" viewBox="0 0 520 154" preserveAspectRatio="none"></svg>
-      </div>
-      <div class="panel">
-        <h2>Progress</h2>
-        <div class="progress-grid" id="progress"></div>
-      </div>
-      <div class="panel">
-        <h2>Zone Heatmap</h2>
-        <div class="zones-grid" id="zones"></div>
-      </div>
-      <div class="panel">
-        <h2>Manual Step</h2>
-        <textarea id="command" placeholder="query metrics&#10;restart service postgres-primary"></textarea>
-        <div class="controls" style="margin-top:10px;">
-          <button id="stepBtn">Send Action</button>
-          <span class="badge" id="stepStatus">idle</span>
-        </div>
-        <div class="sub" id="stepInfo" style="margin-top:10px;"></div>
-      </div>
-      <div class="panel span-2">
-        <h2>Action History</h2>
-        <div class="actions" id="actions"></div>
-      </div>
-      <div class="panel">
-        <h2>Active Alerts</h2>
-        <div class="alerts" id="alerts"></div>
-      </div>
-      <div class="panel span-2">
-        <h2>Service Dependency Graph</h2>
-        <div class="dep-grid" id="dependencyGraph"></div>
-      </div>
-      <div class="panel">
-        <h2>Guidance</h2>
-        <div class="rows" id="guidance"></div>
-      </div>
-      <div class="panel span-2">
-        <h2>Timeline Visualization</h2>
-        <div class="timeline timeline-track" id="timeline"></div>
-      </div>
-      <div class="panel">
-        <h2>RCA / Last Info</h2>
-        <pre id="rca" class="log"></pre>
-      </div>
-      <div class="panel span-3">
-        <details>
-          <summary>Raw State Debug View</summary>
-          <pre id="raw" class="log" style="margin-top:12px;"></pre>
-        </details>
-      </div>
-    </div>
+
+<!-- Left info panel -->
+<div class="glass" id="info">
+  <h2>⚡ War Room — 3D Graph</h2>
+  <div id="status">Reset a scenario to begin.</div>
+  <div class="legend-row"><div class="dot" style="background:#00ff88;box-shadow:0 0 6px #00ff88"></div>Healthy</div>
+  <div class="legend-row"><div class="dot" style="background:#ffaa00;box-shadow:0 0 6px #ffaa00"></div>Degraded</div>
+  <div class="legend-row"><div class="dot" style="background:#ff0044;box-shadow:0 0 6px #ff0044"></div>Down</div>
+  <div class="legend-row"><div class="dot" style="background:#62b0ff;box-shadow:0 0 6px #62b0ff"></div>Restarting</div>
+  <div class="legend-row"><div class="dot" style="background:#cc44ff;box-shadow:0 0 6px #cc44ff"></div>Isolated</div>
+  <div id="node-detail">
+    <h3 id="nd-name"></h3>
+    <div class="nd-row">State: <b id="nd-state"></b></div>
+    <div class="nd-row">Tier: <span id="nd-tier"></span></div>
+    <div class="nd-row" id="nd-cpu-row">CPU: <span id="nd-cpu"></span></div>
+    <div class="nd-row" id="nd-mem-row">Mem: <span id="nd-mem"></span></div>
   </div>
-  <script>
-    const fmt = (n) => typeof n === 'number' ? (Math.round(n * 100) / 100).toString() : String(n ?? 'n/a');
-    const clampPct = (value) => Math.max(0, Math.min(100, value));
-    const esc = (value) => String(value ?? '').replace(/[&<>"]/g, (ch) => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;' }[ch]));
-    let currentSessionId = null;
+</div>
 
-    function rewardPath(history) {
-      if (!history.length) {
-        return '<text x="24" y="82" fill="#8ea2b5" font-size="12">No rewards yet</text>';
+<!-- Right controls -->
+<div class="glass" id="controls">
+  <select id="scenario">
+    <option value="task_1">Task 1 — Postgres Outage</option>
+    <option value="task_2">Task 2 — Queue / Zone</option>
+    <option value="task_3">Task 3 — Bad Deploy</option>
+    <option value="task_4">Task 4 — Redis Session</option>
+    <option value="task_5">Task 5 — Kafka</option>
+    <option value="task_6">Task 6 — Mesh Cert</option>
+    <option value="task_7">Task 7 — Replica Lag</option>
+    <option value="task_8">Task 8 — Cache Stampede</option>
+    <option value="task_9">Task 9 — Rollback Fail</option>
+    <option value="task_10">Task 10 — DNS</option>
+    <option value="task_11">Task 11 — Region Fail</option>
+    <option value="Chaos">Chaos</option>
+  </select>
+  <input id="seed" type="number" placeholder="Seed (optional)"/>
+  <button id="resetBtn">Reset Scenario</button>
+  <button id="refreshBtn">Refresh State</button>
+  <button id="rotateBtn">Stop Rotation</button>
+</div>
+
+<!-- Bottom metrics -->
+<div class="glass" id="metrics">
+  <div class="metric"><div class="val" id="m-healthy">—</div><div class="lbl">Healthy</div></div>
+  <div class="metric"><div class="val" id="m-degraded">—</div><div class="lbl">Degraded</div></div>
+  <div class="metric"><div class="val" id="m-down">—</div><div class="lbl">Down</div></div>
+  <div class="metric"><div class="val" id="m-rps">—</div><div class="lbl">RPS</div></div>
+  <div class="metric"><div class="val" id="m-err">—</div><div class="lbl">Error Rate</div></div>
+  <div class="metric"><div class="val" id="m-avail">—</div><div class="lbl">Availability</div></div>
+</div>
+
+<div id="graph"></div>
+
+<!-- CDN deps -->
+<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+<script src="https://unpkg.com/three@0.160.0/examples/js/postprocessing/EffectComposer.js"></script>
+<script src="https://unpkg.com/three@0.160.0/examples/js/postprocessing/RenderPass.js"></script>
+<script src="https://unpkg.com/three@0.160.0/examples/js/postprocessing/ShaderPass.js"></script>
+<script src="https://unpkg.com/three@0.160.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
+<script src="https://unpkg.com/three@0.160.0/examples/js/shaders/LuminosityHighPassShader.js"></script>
+<script src="https://unpkg.com/three@0.160.0/examples/js/shaders/CopyShader.js"></script>
+<script src="https://unpkg.com/3d-force-graph@1.73.0/dist/3d-force-graph.min.js"></script>
+<script src="https://unpkg.com/gsap@3.12.5/dist/gsap.min.js"></script>
+
+<script>
+// ── Service dependency map ────────────────────────────────────────────────────
+const DEPS = {
+  "postgres-primary":[],
+  "postgres-replica":["postgres-primary"],
+  "redis-cache":[],
+  "redis-session":[],
+  "kafka":[],
+  "zookeeper":[],
+  "mongodb":[],
+  "clickhouse":[],
+  "elasticsearch":[],
+  "object-storage":[],
+  "config-service":[],
+  "dns-control-plane":[],
+  "service-mesh":[],
+  "api-gateway":["edge-proxy","service-mesh","auth-service","dns-control-plane"],
+  "edge-proxy":["service-mesh","dns-control-plane"],
+  "auth-service":["redis-session","postgres-primary","dns-control-plane"],
+  "user-service":["postgres-primary","redis-cache"],
+  "profile-service":["user-service","mongodb"],
+  "billing-service":["postgres-primary","kafka"],
+  "order-service":["postgres-primary","inventory-service","payment-service"],
+  "inventory-service":["postgres-primary","redis-cache"],
+  "payment-service":["billing-service","fraud-service"],
+  "cart-service":["redis-cache","user-service"],
+  "recommendation-service":["clickhouse","kafka"],
+  "search-service":["elasticsearch"],
+  "notification-service":["kafka","email-service"],
+  "email-service":["object-storage"],
+  "analytics-service":["kafka","clickhouse"],
+  "report-service":["analytics-service","clickhouse"],
+  "worker-service":["kafka","redis-cache"],
+  "scheduler-service":["worker-service","config-service"],
+  "fraud-service":["postgres-primary","mongodb"],
+  "frontend-web":["api-gateway","search-service"],
+  "mobile-bff":["api-gateway","user-service"],
+  "admin-portal":["api-gateway","report-service"],
+  "prometheus":[],
+  "grafana":["prometheus"],
+  "loki":["object-storage"],
+  "tempo":["object-storage"],
+  "status-page":[]
+};
+
+const STATE_COLOR = {
+  healthy:"#00ff88", degraded:"#ffaa00", down:"#ff0044",
+  restarting:"#62b0ff", isolated:"#cc44ff"
+};
+
+function getTier(n){
+  if(/postgres|redis|kafka|mongodb|clickhouse|elasticsearch/.test(n)) return "data";
+  if(/gateway|proxy|frontend|mobile|admin/.test(n))                   return "edge";
+  if(/prometheus|grafana|loki|tempo/.test(n))                         return "observability";
+  if(/config|dns|mesh|zookeeper|object-storage/.test(n))              return "infra";
+  if(/status/.test(n))                                                 return "ops";
+  return "app";
+}
+
+// ── Build graph data ──────────────────────────────────────────────────────────
+const nodes = Object.keys(DEPS).map(id => ({
+  id, name:id, state:"healthy", tier:getTier(id), color:STATE_COLOR.healthy
+}));
+const links = [];
+Object.entries(DEPS).forEach(([s,deps]) =>
+  deps.forEach(t => links.push({source:s, target:t, rps:40+Math.random()*60}))
+);
+
+// ── Init 3d-force-graph ───────────────────────────────────────────────────────
+const Graph = ForceGraph3D()(document.getElementById("graph"))
+  .backgroundColor("#0a0a0c")
+  .graphData({nodes, links})
+  .nodeThreeObject(node => {
+    const col = new THREE.Color(node.color || "#00ff88");
+    const mat = new THREE.MeshStandardMaterial({
+      color:col, emissive:col,
+      emissiveIntensity: node.state==="healthy" ? 0.35 : 0.7,
+      roughness:0.25, metalness:0.6
+    });
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(5,32,32), mat);
+    // glow shell
+    mesh.add(new THREE.Mesh(
+      new THREE.SphereGeometry(7.5,32,32),
+      new THREE.MeshBasicMaterial({color:col,transparent:true,opacity:0.12,side:THREE.BackSide})
+    ));
+    node.__mesh = mesh;
+    node.__mat  = mat;
+    // breathing tween
+    if(node.__tween) node.__tween.kill();
+    node.__tween = gsap.to(mat, {
+      emissiveIntensity: (node.state==="healthy"?0.35:0.7)*2.2,
+      duration: node.state==="healthy"?2.5:0.8,
+      yoyo:true, repeat:-1, ease:"sine.inOut"
+    });
+    return mesh;
+  })
+  .nodeThreeObjectExtend(false)
+  .nodeLabel(node => `
+    <div style="background:rgba(10,10,12,.92);border:1px solid rgba(255,255,255,.1);
+      border-radius:8px;padding:10px;backdrop-filter:blur(12px);font-size:12px">
+      <b style="color:#fff">${node.name}</b><br>
+      State: <b style="color:${STATE_COLOR[node.state]||'#fff'}">${node.state}</b><br>
+      Tier: ${node.tier}
+    </div>`)
+  .linkColor(link => {
+    const src = typeof link.source==="object" ? link.source : nodes.find(n=>n.id===link.source);
+    if(src?.state==="down")     return "rgba(255,0,68,.35)";
+    if(src?.state==="degraded") return "rgba(255,170,0,.3)";
+    return "rgba(255,255,255,.07)";
+  })
+  .linkWidth(0.8)
+  .linkDirectionalParticles(link => {
+    const src = typeof link.source==="object" ? link.source : nodes.find(n=>n.id===link.source);
+    if(src?.state==="down")     return 6;
+    if(src?.state==="degraded") return 4;
+    return 2;
+  })
+  .linkDirectionalParticleSpeed(link => {
+    const src = typeof link.source==="object" ? link.source : nodes.find(n=>n.id===link.source);
+    if(src?.state==="degraded") return 0.003+Math.random()*0.008;
+    if(src?.state==="down")     return 0.015+Math.random()*0.01;
+    return 0.002+(((link.rps||50)/100)*0.006);
+  })
+  .linkDirectionalParticleColor(link => {
+    const src = typeof link.source==="object" ? link.source : nodes.find(n=>n.id===link.source);
+    if(src?.state==="down")     return "#ff0044";
+    if(src?.state==="degraded") return "#ffaa00";
+    return "rgba(255,255,255,.55)";
+  })
+  .linkDirectionalParticleWidth(2.5)
+  .onNodeClick(node => {
+    const d = document.getElementById("node-detail");
+    d.style.display = "block";
+    document.getElementById("nd-name").textContent  = node.name;
+    document.getElementById("nd-state").textContent = node.state;
+    document.getElementById("nd-state").style.color = STATE_COLOR[node.state]||"#fff";
+    document.getElementById("nd-tier").textContent  = node.tier;
+    if(node.cpu!=null){
+      document.getElementById("nd-cpu").textContent=(node.cpu*100).toFixed(1)+"%";
+      document.getElementById("nd-cpu-row").style.display="block";
+    } else document.getElementById("nd-cpu-row").style.display="none";
+    if(node.memory!=null){
+      document.getElementById("nd-mem").textContent=(node.memory*100).toFixed(1)+"%";
+      document.getElementById("nd-mem-row").style.display="block";
+    } else document.getElementById("nd-mem-row").style.display="none";
+  })
+  .enableNodeDrag(false)
+  .showNavInfo(false);
+
+// ── Cluster layout via per-tier radial nudge ──────────────────────────────────
+const CENTRES = {
+  data:{x:180,y:0,z:0}, app:{x:60,y:60,z:60}, edge:{x:-160,y:40,z:40},
+  infra:{x:0,y:180,z:0}, observability:{x:0,y:-160,z:80}, ops:{x:-80,y:-80,z:-80}
+};
+Object.entries(CENTRES).forEach(([tier,c]) => {
+  Graph.d3Force("radial-"+tier, () => {
+    nodes.filter(n=>n.tier===tier).forEach(n => {
+      if(n.x==null) return;
+      n.x += (c.x-n.x)*0.18; n.y += (c.y-n.y)*0.18; n.z += (c.z-n.z)*0.18;
+    });
+  });
+});
+
+// ── Bloom post-processing (after engine ready) ────────────────────────────────
+let composer = null;
+Graph.onEngineStop(() => {
+  if(!composer){
+    const renderer = Graph.renderer();
+    const scene    = Graph.scene();
+    const camera   = Graph.camera();
+    composer = new THREE.EffectComposer(renderer);
+    composer.addPass(new THREE.RenderPass(scene, camera));
+    const bloom = new THREE.UnrealBloomPass(
+      new THREE.Vector2(window.innerWidth, window.innerHeight), 1.4, 0.6, 0.1
+    );
+    composer.addPass(bloom);
+    Graph.pauseAnimation();
+    (function loop(){ requestAnimationFrame(loop); if(composer) composer.render(); })();
+  }
+  // Entrance spiral
+  const cam = Graph.camera();
+  nodes.forEach((node,i) => {
+    const mesh = node.__mesh;
+    if(!mesh) return;
+    const fx=mesh.position.x, fy=mesh.position.y, fz=mesh.position.z;
+    const angle=(i/nodes.length)*Math.PI*4;
+    mesh.position.set(cam.position.x+Math.cos(angle)*60, cam.position.y+Math.sin(angle)*60, cam.position.z-800);
+    mesh.scale.set(0.01,0.01,0.01);
+    gsap.to(mesh.position,{x:fx,y:fy,z:fz,duration:2,delay:i*0.025,ease:"expo.out"});
+    gsap.to(mesh.scale,{x:1,y:1,z:1,duration:2,delay:i*0.025,ease:"expo.out"});
+  });
+});
+
+// ── Auto-rotation ─────────────────────────────────────────────────────────────
+let rotating = true;
+(function rot(){
+  requestAnimationFrame(rot);
+  if(!rotating) return;
+  const cam = Graph.camera();
+  const r = Math.sqrt(cam.position.x**2+cam.position.z**2);
+  const a = Math.atan2(cam.position.z, cam.position.x);
+  cam.position.x = r*Math.cos(a+0.0008);
+  cam.position.z = r*Math.sin(a+0.0008);
+  cam.lookAt(0,0,0);
+})();
+document.getElementById("rotateBtn").addEventListener("click",()=>{
+  rotating=!rotating;
+  document.getElementById("rotateBtn").textContent=rotating?"Stop Rotation":"Start Rotation";
+});
+
+// ── State update ──────────────────────────────────────────────────────────────
+let sessionId = null;
+
+function updateGraph(services, details, rps){
+  nodes.forEach(node => {
+    const newState = services[node.id]||"healthy";
+    const detail   = details[node.id]||{};
+    const newColor = STATE_COLOR[newState]||STATE_COLOR.healthy;
+    const wasDown  = node.state==="down";
+    node.state  = newState;
+    node.color  = newColor;
+    node.cpu    = detail.cpu;
+    node.memory = detail.memory;
+    if(node.__mat){
+      const col = new THREE.Color(newColor);
+      node.__mat.color.set(col);
+      node.__mat.emissive.set(col);
+      if(!wasDown && newState==="down"){
+        // failure flash
+        gsap.to(node.__mesh.scale,{x:2,y:2,z:2,duration:.2,yoyo:true,repeat:7,ease:"power3.inOut"});
+        gsap.to(node.__mat,{emissiveIntensity:3.5,duration:.2,yoyo:true,repeat:7,ease:"power3.inOut"});
       }
-      const width = 520;
-      const height = 154;
-      const padX = 18;
-      const padY = 18;
-      const plotWidth = width - padX * 2;
-      const plotHeight = height - padY * 2;
-      const rewards = history.map((item) => Number(item.reward || 0));
-      const maxReward = Math.max(...rewards, 1);
-      const minReward = Math.min(...rewards, 0);
-      const span = Math.max(maxReward - minReward, 0.15);
-      const points = rewards.map((reward, index) => {
-        const x = padX + ((plotWidth * index) / Math.max(rewards.length - 1, 1));
-        const y = padY + ((maxReward - reward) / span) * plotHeight;
-        return `${x},${y}`;
-      }).join(' ');
-      const last = points.split(' ').pop().split(',');
-      const zeroY = padY + ((maxReward - 0) / span) * plotHeight;
-      return `
-        <line x1="${padX}" y1="${zeroY}" x2="${width - padX}" y2="${zeroY}" stroke="rgba(255,255,255,.12)" stroke-dasharray="4 4"/>
-        <polyline fill="none" stroke="#62b0ff" stroke-width="3" points="${points}" />
-        <polyline fill="rgba(98,176,255,.12)" stroke="none" points="${padX},${height - padY} ${points} ${width - padX},${height - padY}" />
-        <circle cx="${last[0]}" cy="${last[1]}" r="4" fill="#7ef0c4" />
-      `;
-    }
-
-    function zoneSeverity(detail) {
-      const latency = Number(detail.latency_ms || 0);
-      const loss = Number(detail.packet_loss || 0);
-      if (detail.status === 'down') return 100;
-      return clampPct((latency / 4) + (loss * 8) + (detail.drained ? 20 : 0) + (detail.failed_over ? 10 : 0));
-    }
-
-    async function resetScenario() {
-      const task_id = document.getElementById('scenario').value;
-      const seed = document.getElementById('seed').value;
-      const response = await fetch('/reset', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task_id, seed: seed ? Number(seed) : null }),
+      if(node.__tween) node.__tween.kill();
+      node.__tween = gsap.to(node.__mat,{
+        emissiveIntensity:(newState==="healthy"?0.35:0.7)*2.2,
+        duration:newState==="healthy"?2.5:0.8,
+        yoyo:true,repeat:-1,ease:"sine.inOut"
       });
-      const data = await response.json();
-      currentSessionId = data.session_id;
-      await load();
     }
+  });
+  // refresh link colours / particles
+  Graph.graphData(Graph.graphData());
+  // metrics bar
+  const counts = {healthy:0,degraded:0,down:0};
+  Object.values(services).forEach(s=>{ if(counts[s]!=null) counts[s]++; });
+  document.getElementById("m-healthy").textContent  = counts.healthy;
+  document.getElementById("m-degraded").textContent = counts.degraded;
+  document.getElementById("m-down").textContent     = counts.down;
+  document.getElementById("m-rps").textContent      = Math.round(rps);
+}
 
-    async function sendStep() {
-      const command = document.getElementById('command').value.trim();
-      if (!command || !currentSessionId) return;
-      document.getElementById('stepStatus').textContent = 'sending';
-      const response = await fetch('/step', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: currentSessionId, action_type: 'raw_command', params: { command } }),
-      });
-      const data = await response.json();
-      currentSessionId = data.session_id || currentSessionId;
-      document.getElementById('stepStatus').textContent = data.done ? 'done' : 'ok';
-      document.getElementById('stepInfo').textContent = data.reward ? `${data.reward.reason} | reward=${data.reward.value}` : JSON.stringify(data);
-      await load();
-    }
+async function loadState(){
+  if(!sessionId) return;
+  try{
+    const r = await fetch("/state?session_id="+encodeURIComponent(sessionId));
+    const d = await r.json();
+    const st = d.state;
+    updateGraph(st.services||{}, st.service_details||{}, st.metrics?.requests_per_sec||0);
+    const m = st.metrics||{};
+    document.getElementById("m-err").textContent   = (m.error_rate!=null?m.error_rate.toFixed(3):"—");
+    document.getElementById("m-avail").textContent = (m.availability!=null?m.availability+"%":"—");
+    const h=Object.values(st.services||{}).filter(s=>s==="healthy").length;
+    const t=Object.keys(st.services||{}).length;
+    document.getElementById("status").textContent =
+      `${h}/${t} healthy · RPS ${Math.round(m.requests_per_sec||0)} · Tick ${st.incident?.events?.length||0}`;
+  }catch(e){ document.getElementById("status").textContent="Error: "+e.message; }
+}
 
-    async function load() {
-      if (!currentSessionId) {
-        document.getElementById('summary').textContent = 'Reset a scenario to create a session.';
-        return;
-      }
-      const [stateResp, timelineResp] = await Promise.all([
-        fetch(`/state?session_id=${encodeURIComponent(currentSessionId)}`),
-        fetch(`/timeline?session_id=${encodeURIComponent(currentSessionId)}`),
-      ]);
-      const statePayload = await stateResp.json();
-      const timelinePayload = await timelineResp.json();
-      const state = statePayload.state;
-      const episode = state.episode || {};
-      const incident = state.incident || {};
-      const sla = state.sla || {};
-      const artifacts = incident.artifact_status || {};
-      const rewardHistory = episode.reward_history || [];
-      const lastReward = episode.last_reward || {};
-      const evidenceDone = (incident.evidence_collected || []).length;
-      const evidenceTotal = (incident.required_evidence || []).length || 1;
-      const mitigationDone = (incident.mitigations_applied || []).length;
-      const mitigationTotal = (incident.required_mitigations || []).length || 1;
-      const artifactDone = Object.values(artifacts).filter(Boolean).length;
-      const artifactTotal = Object.keys(artifacts).length || 1;
-      const stepPct = clampPct(((episode.steps_used || 0) / 24) * 100);
-      const slaScore = clampPct(Number(state.metrics?.availability || 0));
-      const timelineEvents = (timelinePayload.events || incident.events || []).slice(-18).reverse();
-      const targets = new Set([...(incident.service_targets || []), ...Object.keys(state.services || {}).filter((svc) => (incident.blast_radius || []).includes(svc))]);
-      const dependencyCards = Object.entries(state.service_details || {})
-        .filter(([name]) => targets.size === 0 || targets.has(name))
-        .slice(0, 9);
+async function resetScenario(){
+  document.getElementById("status").textContent="Resetting…";
+  const task = document.getElementById("scenario").value;
+  const seed = document.getElementById("seed").value;
+  try{
+    const r = await fetch("/reset",{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({task_id:task, seed:seed?Number(seed):null})
+    });
+    const d = await r.json();
+    sessionId = d.session_id;
+    document.getElementById("status").textContent="Session: "+sessionId.substring(0,12)+"…";
+    await loadState();
+  }catch(e){ document.getElementById("status").textContent="Error: "+e.message; }
+}
 
-      document.getElementById('summary').textContent = `${incident.name} | severity=${incident.severity} | resolved=${incident.resolved} | affected_users=${state.estimated_affected_users}`;
-      document.getElementById('badges').innerHTML = `
-        <span class="pill">session ${esc(currentSessionId)}</span>
-        <span class="pill">episode ${esc(episode.episode_id ?? 'n/a')}</span>
-        <span class="pill">task ${esc(episode.task_id ?? 'n/a')}</span>
-        <span class="pill">steps ${esc(episode.steps_used ?? 0)}/24</span>
-        <span class="pill">done ${episode.done ? 'yes' : 'no'}</span>
-      `;
-      document.getElementById('metrics').innerHTML = [
-        ['Error Rate', state.metrics.error_rate],
-        ['P99 Latency', `${state.metrics.p99_latency_ms} ms`],
-        ['Availability', `${state.metrics.availability}%`],
-        ['Queue Depth', state.metrics.queue_depth],
-        ['CPU', state.metrics.cpu],
-        ['Memory', state.metrics.memory],
-        ['RPS', state.metrics.requests_per_sec],
-        ['Affected Users', state.estimated_affected_users],
-      ].map(([k,v]) => `<div class="metric"><strong>${esc(k)}</strong><div class="value">${esc(v)}</div></div>`).join('');
-
-      document.getElementById('totalReward').textContent = fmt(episode.total_reward ?? 0);
-      document.getElementById('lastReward').textContent = fmt(lastReward.reward ?? 0);
-      document.getElementById('lastReason').textContent = lastReward.reason || 'No reward recorded yet.';
-      document.getElementById('rewardChart').innerHTML = rewardPath(rewardHistory.slice(-24));
-
-      document.getElementById('progress').innerHTML = [
-        ['Evidence', evidenceDone, evidenceTotal, clampPct((evidenceDone / evidenceTotal) * 100)],
-        ['Mitigations', mitigationDone, mitigationTotal, clampPct((mitigationDone / mitigationTotal) * 100)],
-        ['Artifacts', artifactDone, artifactTotal, clampPct((artifactDone / artifactTotal) * 100)],
-        ['Step Budget', episode.steps_used || 0, 24, stepPct],
-      ].map(([label, done, total, pct]) => `
-        <div>
-          <div class="progress-title"><span>${esc(label)}</span><span>${done}/${total}</span></div>
-          <div class="bar ${pct > 80 ? 'warn' : ''}"><span style="width:${pct}%"></span></div>
-        </div>
-      `).join('');
-
-      document.getElementById('zones').innerHTML = Object.entries(state.zones || {}).map(([zone, detail]) => {
-        const severity = zoneSeverity(detail);
-        return `
-          <div class="zone-card">
-            <div class="zone-top">
-              <strong>${esc(zone)}</strong>
-              <span class="${esc(detail.status)}">${esc(detail.status)}</span>
-            </div>
-            <div class="progress-title"><span>Heat</span><span>${severity}%</span></div>
-            <div class="heat"><span style="width:${severity}%"></span></div>
-            <div class="sub">latency=${esc(detail.latency_ms)}ms | loss=${esc(detail.packet_loss)} | drained=${esc(detail.drained)} | failover=${esc(detail.failed_over)}</div>
-          </div>
-        `;
-      }).join('') || '<div class="sub">No zones loaded.</div>';
-
-      document.getElementById('alerts').innerHTML = (state.alerts || []).slice().reverse().map((alert) => `
-        <div class="action">
-          <div class="action-top"><strong>${esc(alert.source || 'system')}</strong><span class="${alert.severity === 'CRITICAL' ? 'failure' : 'degraded'}">${esc(alert.severity)}</span></div>
-          <div>${esc(alert.message)}</div>
-        </div>
-      `).join('') || '<div class="sub">No active alerts.</div>';
-
-      document.getElementById('guidance').innerHTML = [
-        ...(incident.required_evidence || []).filter((item) => !(incident.evidence_collected || []).includes(item)).slice(0,4).map((item) => `<div class="row"><span>Need evidence</span><code>${esc(item)}</code></div>`),
-        ...(incident.required_mitigations || []).filter((item) => !(incident.mitigations_applied || []).includes(item)).slice(0,4).map((item) => `<div class="row"><span>Need mitigation</span><code>${esc(item)}</code></div>`),
-      ].join('') || '<div class="sub">Required evidence and mitigations are complete.</div>';
-
-      document.getElementById('actions').innerHTML = (incident.actions_executed || []).slice().reverse().map((action) => `
-        <div class="action">
-          <div class="action-top">
-            <strong>${esc(action.action)}${action.target ? ` ${esc(action.target)}` : ''}</strong>
-            <span class="${action.success ? 'success' : 'failure'}">${action.success ? 'success' : 'failed'}</span>
-          </div>
-          <div class="sub">tick=${esc(action.tick)} | params=${esc(JSON.stringify(action.params || {}))}</div>
-        </div>
-      `).join('') || '<div class="sub">No actions executed yet.</div>';
-
-      document.getElementById('dependencyGraph').innerHTML = dependencyCards.map(([service, detail]) => `
-        <div class="dep-card">
-          <div class="dep-name">
-            <strong>${esc(service)}</strong>
-            <span class="${esc(state.services?.[service] || 'healthy')}">${esc(state.services?.[service] || 'unknown')}</span>
-          </div>
-          <div class="dep-links">
-            ${(detail.dependencies || []).slice(0, 8).map((dep) => `<span class="dep-pill">${esc(dep)}</span>`).join('') || '<span class="dep-pill">no deps</span>'}
-          </div>
-        </div>
-      `).join('') || '<div class="sub">No dependency information available.</div>';
-
-      document.getElementById('timeline').innerHTML = timelineEvents.map((evt) => `
-        <div class="event">
-          <div class="action-top"><strong>${esc(evt.type)}</strong><span class="badge">tick ${esc(evt.tick)}</span></div>
-          <div>${esc(evt.summary)}</div>
-        </div>
-      `).join('') || '<div class="sub">No timeline events yet.</div>';
-
-      document.getElementById('slaStatus').textContent = sla.current_status || 'n/a';
-      document.getElementById('slaTargetAvailability').textContent = sla.target_availability != null ? `${sla.target_availability}%` : 'n/a';
-      document.getElementById('slaTargetError').textContent = sla.target_error_rate != null ? `${sla.target_error_rate}` : 'n/a';
-      document.getElementById('slaBreaches').textContent = String((sla.breaches || []).length);
-      document.getElementById('slaValue').textContent = `${slaScore}%`;
-      document.getElementById('slaRing').style.background = `conic-gradient(${sla.current_status === 'breached' ? '#ff6b6b' : '#62b0ff'} 0deg, ${sla.current_status === 'breached' ? '#ff6b6b' : '#62b0ff'} ${slaScore * 3.6}deg, rgba(255,255,255,.08) ${slaScore * 3.6}deg 360deg)`;
-
-      document.getElementById('rca').textContent = JSON.stringify(incident.rca || { last_reward: episode.last_reward, last_info: episode.last_info }, null, 2);
-      document.getElementById('raw').textContent = JSON.stringify(state, null, 2);
-    }
-    document.getElementById('resetBtn').addEventListener('click', resetScenario);
-    document.getElementById('refreshBtn').addEventListener('click', load);
-    document.getElementById('stepBtn').addEventListener('click', sendStep);
-    load();
-    setInterval(load, 4000);
-  </script>
+document.getElementById("resetBtn").addEventListener("click",  resetScenario);
+document.getElementById("refreshBtn").addEventListener("click", loadState);
+setInterval(loadState, 3000);
+</script>
 </body>
-</html>
-"""
+</html>"""
+
 
 
 @app.get("/health")
